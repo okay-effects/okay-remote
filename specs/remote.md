@@ -13,9 +13,9 @@ it. okay-remote needs neither: the agent and the model are the machine's, the pa
 ## The parts
 
 ```text
-phone (PWA) ──HTTP+SSE──▶ okay-remote (the daemon, JVM) ──spawns──▶ claude -p (stream-json in and out), in a project
-                               ▲                                      │  (or: rozum launch --model … -- claude …)
-                               └──── PreToolUse hook (curl) ◀─────────┘  every tool call, decided by the policy
+phone (PWA) ──HTTP+SSE──▶ the daemon (JVM) ──spawns──▶ claude -p (stream-json), in a project
+                               ▲                         │  (or: rozum launch --model … -- claude …)
+                               └── PreToolUse hook ◀─────┘  every tool call, decided by the policy
 ```
 
 - **The daemon** (`daemon/`, `okay-remote.jar`): the projects, the sessions, the policy, the page. Over okay-guard's
@@ -31,7 +31,8 @@ phone (PWA) ──HTTP+SSE──▶ okay-remote (the daemon, JVM) ──spawns�
   `--dangerously-skip-permissions`; the hook decides either way.
 - **The policy**: Claude Code's `PreToolUse` hook (given with `--settings`, matcher `*`) posts each tool call to the
   daemon (`/hook/<session>`), which decides it by an okay-guard policy (okay-policy, the language of okay-guard):
-  `allow` → the call goes; `deny` → it does not, the agent told why; `ask` → the phone is asked, the hook waits for
+  `allow` → the call goes; `deny` → it does not, the agent told why; `ask` → the phone is asked, the hook waits
+  for
   the answer (10 minutes, then no). The call's arguments are the tool's input, and `cwd`, the project's directory.
   The policy is `~/.okay-remote/policy.policy`, editable in the page; a default ships (`core/Defaults`).
 - **The page** (`web/`, an okay-ui program, like okay-guard's studio): Projects → a session as a conversation (your

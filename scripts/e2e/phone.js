@@ -7,7 +7,8 @@ for (const d of [home, projects]) fs.rmSync(d, { recursive: true, force: true })
 fs.mkdirSync(`${home}/.okay-remote`, { recursive: true }); fs.mkdirSync(`${projects}/demo`, { recursive: true });
 execSync(`cd ${projects}/demo && git init -q && echo '# demo' > README.md`);
 fs.writeFileSync(`${home}/.okay-remote/roots`, projects);
-const daemon = spawn("java", [`-Duser.home=${home}`, "-jar", `${__dirname}/../../dist/okay-remote.jar`, "--port", "7791"],
+const jar = `${__dirname}/../../dist/okay-remote.jar`;
+const daemon = spawn("java", [`-Duser.home=${home}`, "-jar", jar, "--port", "7791"],
   { stdio: ["ignore", "ignore", "inherit"] });
 let failed = 0;
 const check = (what, ok) => { console.log(`${ok ? "✓" : "✗"} ${what}`); if (!ok) failed++; };
@@ -21,14 +22,18 @@ const check = (what, ok) => { console.log(`${ok ? "✓" : "✗"} ${what}`); if (
     check("connected", (await b.text()).includes("connected"));
     check("the token taken out of the address", !(await b.js("location.search")).includes("t="));
     await b.click("New"); await b.sleep(400);
-    await b.js(`(()=>{const m=document.querySelector('[name=f-model],#f-model')||[...document.querySelectorAll('select')][1];
-      m.value=[...m.options].find(o=>o.text==='Claude Haiku').value; m.dispatchEvent(new Event('change',{bubbles:true}));
-      const t=document.querySelector('textarea'); t.value='Run the command: python3 -c "print(6*7)" and tell me what it printed. Nothing else.';
+    const task = 'Run the command: python3 -c "print(6*7)" and tell me what it printed. Nothing else.';
+    await b.js(`(()=>{const m=[...document.querySelectorAll('select')][1];
+      m.value=[...m.options].find(o=>o.text==='Claude Haiku').value;
+      m.dispatchEvent(new Event('change',{bubbles:true}));
+      const t=document.querySelector('textarea'); t.value=${JSON.stringify(task)};
       t.dispatchEvent(new Event('input',{bubbles:true})); return true})()`);
     await b.shot("/tmp/or-new.png");
     check("started", await b.click("Start"));
     let waiting = false;
-    for (let i = 0; i < 60 && !waiting; i++) { await b.sleep(1000); waiting = (await b.text()).includes("waiting for you"); }
+    for (let i = 0; i < 60 && !waiting; i++) {
+      await b.sleep(1000); waiting = (await b.text()).includes("waiting for you");
+    }
     check("a call waits for you", waiting);
     await b.shot("/tmp/or-waiting.png");
     check("approved in the page", await b.click("Approve"));

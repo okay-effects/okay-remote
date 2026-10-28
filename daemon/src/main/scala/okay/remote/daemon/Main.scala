@@ -31,7 +31,9 @@ object OnJvm extends Machine:
     new Agent:
       def send(line: String): Unit = p.send(line)
       def lines(f: String => Unit): Unit = p.lines(f)
-      def ended(f: String => Unit): Unit = { p.ended(code => f(s"ended ($code)")); p.failed(e => f(s"not started: $e")) }
+      def ended(f: String => Unit): Unit =
+        p.ended(code => f(s"ended ($code)"))
+        p.failed(e => f(s"not started: $e"))
       def kill(): Unit = p.kill()
 
 final class Daemon(args: List[String]):
@@ -54,7 +56,8 @@ final class Daemon(args: List[String]):
       port = p
       val here = s"http://127.0.0.1:$p/?t=$token"
       JvmOs.err(s"okay-remote: open $here\n")
-      if lan then JvmOs.lanAddresses.foreach(a => JvmOs.err(s"  on your phone (same network): http://$a:$p/?t=$token\n"))
+      if lan then JvmOs.lanAddresses.foreach(a =>
+        JvmOs.err(s"  on your phone (same network): http://$a:$p/?t=$token\n"))
       JvmOs.err(s"  projects under ${remote.roots.mkString(", ")} (${remote.projects.size}); " +
         s"the policy: ${remote.base}/policy.policy\n")
     }
@@ -116,7 +119,8 @@ object Page:
     "/sw.js" -> ("sw.js", "text/javascript"),
     "/icon.svg" -> ("icon.svg", "image/svg+xml"),
     "/page.js" -> ("page.js", "text/javascript"))
-  def file(path: String): Option[(String, String)] = files.get(path).flatMap((name, kind) => module(name).map(kind -> _))
+  def file(path: String): Option[(String, String)] =
+    files.get(path).flatMap((name, kind) => module(name).map(kind -> _))
   def module(name: String): Option[String] =
     Option(getClass.getResourceAsStream(s"/okay-remote-page/$name")).map { in =>
       try new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8) finally in.close()

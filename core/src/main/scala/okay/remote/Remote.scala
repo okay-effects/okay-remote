@@ -122,7 +122,8 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
           val id = m.randomHex(6)
           val model = if Models.all.exists(_._1 == s("model")) then s("model") else Models.all.head._1
           val line = s("task").trim.linesIterator.next()
-          val title = if line.length <= 80 then line else line.take(79).reverse.dropWhile(_ != ' ').reverse.trim + " …"
+          val title = if line.length <= 80 then line
+            else line.take(79).reverse.dropWhile(_ != ' ').reverse.trim + " …"
           val x = Session(id, s("project"), model, title, created = m.now,
             updated = m.now)
           sessions(id) = x

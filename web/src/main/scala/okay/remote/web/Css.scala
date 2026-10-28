@@ -68,7 +68,8 @@ object Css:
        |/* the conversation */
        |.okay-mark-session-head p:first-child { font-weight: 700; font-size: 15px; display: -webkit-box;
        |  -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-       |body .okay-face .okay-mark-you > .okay-group { max-width: 86%; margin-left: auto; background: var(--okay-accent);
+       |body .okay-face .okay-mark-you > .okay-group { max-width: 86%; margin-left: auto;
+       |  background: var(--okay-accent);
        |  border-radius: 18px 18px 6px 18px; padding: 10px 14px; border: 0; }
        |.okay-mark-you p { color: #fff; }
        |body .okay-face .okay-mark-agent > .okay-group { max-width: 92%; background: var(--okay-surface);
@@ -95,7 +96,8 @@ object Css:
        |.okay-mark-unfold .okay-mark-button > .okay-ref { min-height: 28px; padding: 0 6px; border: 0;
        |  background: none; color: var(--okay-accent); font-size: 13px; box-shadow: none; }
        |body .okay-face .okay-mark-end > .okay-group { border-top: 1px dashed var(--okay-border); padding-top: 6px; }
-       |body .okay-face .okay-mark-end-failed > .okay-group { border-top: 1px dashed var(--or-block); padding-top: 6px; }
+       |body .okay-face .okay-mark-end-failed > .okay-group { border-top: 1px dashed var(--or-block);
+       |  padding-top: 6px; }
        |.okay-mark-composer textarea { min-height: 64px; font-size: 16px; }
        |.okay-mark-composer .okay-mark-slot > .okay-group { flex-wrap: nowrap; }
        |.okay-mark-policy textarea { min-height: 60vh; font: 13px/1.45 ui-monospace, Menlo, monospace; }
