@@ -91,8 +91,9 @@ the policy too).
 ## For developers
 
 How it works: [specs/remote.md](specs/remote.md). Built with [okay-effects](https://okay-effects.github.io/) on
-[okay-guard](https://okay-effects.github.io/okay-guard/). `sbt fatJar` builds `dist/okay-remote.jar` — it needs
-okay-guard's libraries (`okay-guard-*` 0.1.0-SNAPSHOT) in the local Ivy repository. The relay is `relay/` (a
+[okay-guard](https://okay-effects.github.io/okay-guard/). You need Java 17+ and [sbt](https://www.scala-sbt.org/);
+`sbt fatJar` builds `dist/okay-remote.jar` (the libraries come from their Maven repositories on GitHub Pages,
+okay-guard's at https://okay-effects.github.io/okay-guard/maven). The relay is `relay/` (a
 Cloudflare Worker): `sbt relayDist`, then `relay/deploy.sh`, and `okay-remote --relay <its URL>`. Tests: `sbt
 coreJVM/test`, `scripts/e2e/security.sh`, `node scripts/e2e/phone.js`, `node scripts/e2e/relay.js`, `node
 scripts/e2e/agents.js "<agent>"`.

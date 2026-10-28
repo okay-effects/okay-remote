@@ -3,14 +3,14 @@ import org.scalajs.linker.interface.ModuleKind
 import sbtcrossproject.CrossPlugin.autoImport.{crossProject, CrossType}
 
 val scala3 = "3.3.8"
-val okayGuard = "0.1.0-SNAPSHOT"
+val okayGuard = "0.1.0"
 val okayUi = "0.1.0"
 
 ThisBuild / organization := "io.github.okay-effects"
 ThisBuild / version := "0.1.0-SNAPSHOT"
 ThisBuild / scalaVersion := scala3
 ThisBuild / scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Wunused:imports,privates,locals")
-ThisBuild / resolvers ++= Seq(Resolver.mavenLocal,
+ThisBuild / resolvers ++= Seq("okay-guard" at "https://okay-effects.github.io/okay-guard/maven",
   "okay-effects" at "https://okay-effects.github.io/okay-simple/maven",
   "okay-mcp" at "https://okay-effects.github.io/okay-mcp/maven",
   "okay-faces" at "https://okay-effects.github.io/okay-faces/maven",
