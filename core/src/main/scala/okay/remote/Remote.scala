@@ -18,7 +18,10 @@ trait Machine:
   def list(dir: String): List[String]
   /** a path as the system names it, its links followed (`/tmp` is `/private/tmp` on a Mac) */
   def real(path: String): String
-  def spawn(command: List[String], dir: String): Agent
+  /** a process in `dir`, with `env` added to the daemon's own */
+  def spawn(command: List[String], dir: String, env: Map[String, String] = Map.empty): Agent
+  /** a command run to its end: its exit code and its output (at most `limit` characters) */
+  def run(command: List[String], dir: String, limit: Int = 400000)(done: (Int, String) => Unit): Unit
   def log(text: String): Unit
 
 /** an agent's process: a line to it, its lines, its end */
@@ -49,14 +52,24 @@ object Models:
     "local:mlx-community:Qwen3.6-35B-A3B-4bit" -> "Local · Qwen3.6 35B (rozum)",
     "local:mlx-community:Qwen3.5-4B-MLX-4bit" -> "Local · Qwen3.5 4B (rozum)")
 
-  /** the command of a session's agent: Claude Code, steered by lines of JSON, every tool call through the hook */
-  def command(model: String, settings: String, resume: String): List[String] =
+  /** the command of a session's agent and what it adds to the environment: Claude Code, steered by lines of JSON,
+   * every tool call through the hook; in rozum's jail where it can be (specs/remote.md, "Safety, in layers") */
+  def command(model: String, settings: String, resume: String, jail: Jail): (List[String], Map[String, String]) =
     val claude = List("claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
       "--permission-mode", "default", "--settings", settings) ++
       (if resume.nonEmpty then List("--resume", resume) else Nil)
     if model.startsWith("local:") then
-      List("rozum", "launch", "--offline", "--model", model.stripPrefix("local:"), "--") ++ claude
-    else claude ++ List("--model", model.stripPrefix("claude:"))
+      (List("rozum", "launch", "--offline", "--model", model.stripPrefix("local:"), "--") ++ claude, Map.empty)
+    else
+      val withModel = claude ++ List("--model", model.stripPrefix("claude:"))
+      jail.claudeToken match
+        case Some(token) if jail.rozum => (List("rozum", "launch", "--no-model", "--") ++ withModel,
+            Map("CLAUDE_CODE_OAUTH_TOKEN" -> token, "ROZUM_SANDBOX_NETWORK" -> "full"))
+        case _ => (withModel, Map.empty)
+
+/** what the machine has for the jail: rozum, and a token for Claude that needs no keychain */
+final case class Jail(rozum: Boolean = false, claudeToken: Option[String] = None):
+  def claudeJailed: Boolean = rozum && claudeToken.nonEmpty
 
 /**
  * THE REMOTE: the projects, the sessions, each session's agent and its steps, the policy deciding every tool call,
@@ -64,7 +77,7 @@ object Models:
  * page told by `tell` (an event's name, its data).
  */
 final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
-                   judgeOf: String => Either[String, Judge]):
+                   judgeOf: String => Either[String, Judge], jail: () => Jail = () => Jail()):
   import J.*
   val base: String = s"${m.home}/.okay-remote"
   private def file(s: String) = s"$base/$s"
@@ -105,9 +118,18 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
     "projects" -> Json.Arr(projects.map(Json.Str(_)).toVector),
     "sessions" -> Json.Arr(sessions.values.toVector.reverse.map(s => summary(s).toJson)),
     "models" -> Json.Arr(Models.all.map((k, l) => Json.obj("id" -> Json.Str(k), "label" -> Json.Str(l))).toVector),
-    "policy" -> Json.Str(policy), "policyError" -> Json.Str(judge.left.getOrElse(""))))
+    "policy" -> Json.Str(policy), "policyError" -> Json.Str(judge.left.getOrElse("")),
+    "jail" -> Json.obj("rozum" -> Json.Bool(jail().rozum), "claude" -> Json.Bool(jail().claudeJailed))))
 
-  def act(body: Json): Either[String, Json] =
+  /** an act of the page, answered when it is done (most at once; `diff` when git has answered) */
+  def act(body: Json)(answer: Either[String, Json] => Unit): Unit =
+    def s(k: String) = str(body, k).getOrElse("")
+    str(body, "type").getOrElse("") match
+      case "diff" => diff(s("session"))(answer)
+      case "always" => always(s("call"))(answer)
+      case _ => answer(now(body))
+
+  private def now(body: Json): Either[String, Json] =
     def s(k: String) = str(body, k).getOrElse("")
     str(body, "type").getOrElse("") match
       case "hello" => Right(snapshot)
@@ -133,15 +155,7 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
       case "stop" => live.remove(s("session")).fold(Left("not running")) { l =>
           l.agent.kill(); Right(Json.Obj.empty)
         }
-      case "verdict" => waits.remove(s("call")).fold(Left("nothing waits for that")) { w =>
-          val approve = bool(body, "approve")
-          val why = s("why")
-          record(w.session, Step.Decided(w.id, if approve then "approved" else "refused", why))
-          w.answer(if approve then "allow" else "deny", if approve then "approved on the phone"
-            else if why.nonEmpty then s"refused: $why" else "refused by the person")
-          changed(w.session)
-          Right(Json.Obj.empty)
-        }
+      case "verdict" => verdict(s("call"), bool(body, "approve"), s("why"))
       case "policy" =>
         judgeOf(s("text")) match
           case Left(e) => Left(e)
@@ -150,12 +164,54 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
             Right(Json.Obj.empty)
       case "forget" => sessions.get(s("session")).fold(Left("no such session")) { x =>
           live.remove(x.id).foreach(_.agent.kill())
-          sessions.remove(x.id); kept.remove(x.id)
+          sessions.remove(x.id); kept.remove(x.id); heads.remove(x.id)
           m.remove(file(s"sessions/${x.id}.json")); m.remove(file(s"sessions/${x.id}.jsonl"))
           tell("forgot", Json.Str(x.id))
           Right(Json.Obj.empty)
         }
       case other => Left(s"no act $other")
+
+  private def verdict(call: String, approve: Boolean, why: String): Either[String, Json] =
+    waits.remove(call).fold(Left("nothing waits for that")) { w =>
+      record(w.session, Step.Decided(w.id, if approve then "approved" else "refused", why))
+      w.answer(if approve then "allow" else "deny", if approve then "approved on the phone"
+        else if why.nonEmpty then s"refused: $why" else "refused by the person")
+      changed(w.session)
+      Right(Json.Obj.empty)
+    }
+
+  /** ALWAYS ALLOW: a rule made of a waiting call, added to the policy if, added, it allows this call — then the call
+   * approved. An `ask` still wins over an `allow`: then nothing is added, and the answer says which rule asks */
+  private def always(call: String)(answer: Either[String, Json] => Unit): Unit =
+    waits.get(call) match
+      case None => answer(Left("nothing waits for that"))
+      case Some(w) =>
+        val text = Rules.added(policy, w.tool, w.input)
+        judgeOf(text) match
+          case Left(e) => answer(Left(s"the rule did not compile: $e"))
+          case Right(j) => j.decide(call, w.tool, w.input, sessions.get(w.session).fold("")(_.project)) {
+              (v, why) =>
+                if v != "allow" then answer(Left(s"a rule still ${if v == "deny" then "denies" else "asks for"} it" +
+                  (if why.nonEmpty then s": $why" else "") + " — change the policy to allow it"))
+                else
+                  m.write(file("policy.policy"), text); judge = Right(j); tell("policy", Json.Str(text))
+                  answer(verdict(call, true, "always allowed").map(_ => Json.obj("policy" -> Json.Str(text))))
+            }
+
+  /** CHANGES: the project's `git status` and `git diff` (staged and not), as git says them */
+  private def diff(id: String)(answer: Either[String, Json] => Unit): Unit =
+    sessions.get(id) match
+      case None => answer(Left("no such session"))
+      case Some(x) =>
+        m.run(List("git", "status", "--short"), x.project) { (c1, status) =>
+          if c1 != 0 then answer(Left(s"git status: ${status.take(300)}"))
+          else m.run(List("git", "diff", "HEAD", "--no-color", "--no-ext-diff"), x.project) { (c2, d) =>
+            m.run(List("git", "diff", "--no-color", "--no-ext-diff"), x.project) { (_, unborn) =>
+              // a repository with no commit yet has no HEAD: the working tree's diff then
+              answer(Right(Json.obj("status" -> Json.Str(status), "diff" -> Json.Str(if c2 == 0 then d else unborn))))
+            }
+          }
+        }
 
   /** a person's words to a session: to its agent, started (or started again, resumed) if it is not running */
   private def say(id: String, text: String): Either[String, Unit] =
@@ -178,7 +234,8 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
     val settings = Json.print(Json.obj("hooks" -> Json.obj("PreToolUse" -> Json.arr(Json.obj(
       "matcher" -> Json.Str("*"), "hooks" -> Json.arr(Json.obj("type" -> Json.Str("command"),
         "command" -> Json.Str(hook), "timeout" -> Json.num(askFor / 1000 + 60))))))))
-    val agent = m.spawn(Models.command(x.model, settings, x.agent), x.project)
+    val (command, env) = Models.command(x.model, settings, x.agent, jail())
+    val agent = m.spawn(command, x.project, env)
     live(x.id) = Live(agent, key)
     sessions(x.id) = x.copy(running = true)
     agent.lines(l => Step.ofAgent(l).foreach { st =>
@@ -228,6 +285,13 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
               })
           }
 
+  /** each session's record checked: its chain unbroken, or where it breaks */
+  def verify: List[(String, Either[String, Int])] = sessions.keys.toList.sorted.map { id =>
+    val records = m.read(file(s"sessions/$id.jsonl")).toList.flatMap(_.linesIterator)
+      .flatMap(l => Descent.parse(l).toOption)
+    id -> okay.guard.Chain.verify(records)
+  }
+
   // ---- KEEPING AND TELLING
 
   private def waitJson(w: Wait): Json = Json.Obj(Vector("session" -> Json.Str(w.session), "call" -> Json.Str(w.id),
@@ -236,9 +300,19 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
   private def summary(x: Session): Session = x.copy(running = live.contains(x.id),
     waiting = waits.values.count(_.session == x.id))
 
+  /** the last link of each session's chain: its sequence number and hash */
+  private val heads = mutable.Map.empty[String, (Long, String)]
+  private def head(id: String): (Long, String) = heads.getOrElseUpdate(id,
+    m.read(file(s"sessions/$id.jsonl")).flatMap(_.linesIterator.toList.lastOption)
+      .flatMap(l => Descent.parse(l).toOption)
+      .fold((0L, okay.guard.Chain.start))(j => (okay.guard.Chain.seqOf(j), okay.guard.Chain.hashOf(j))))
+
   private def record(id: String, st: Step): Unit =
     kept(id) = steps(id) :+ st
-    m.append(file(s"sessions/$id.jsonl"), Json.print(Step.toJson(st)) + "\n")
+    val (seq, prev) = head(id)
+    val linked = okay.guard.Chain.link(seq + 1, prev, Step.toJson(st))
+    heads(id) = (seq + 1, okay.guard.Chain.hashOf(linked))
+    m.append(file(s"sessions/$id.jsonl"), Json.print(linked) + "\n")
     tell("step", Json.obj("session" -> Json.Str(id), "step" -> Step.toJson(st)))
 
   private def loadSteps(id: String): Vector[Step] = m.read(file(s"sessions/$id.jsonl")).toVector
