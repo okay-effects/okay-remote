@@ -39,6 +39,7 @@ class RemoteSuite extends munit.FunSuite:
         def ended(f: String => Unit) = onEnd = f
         def kill() = onEnd("killed")
     def log(t: String) = ()
+    def real(p: String) = p
 
   def made(): (Fake, Remote, mutable.Buffer[(String, Json)]) =
     val m = Fake()

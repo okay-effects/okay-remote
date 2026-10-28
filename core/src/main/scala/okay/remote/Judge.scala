@@ -15,10 +15,12 @@ final class Judge private (guard: PolicyGuard):
     val args = input match
       case o: Json.Obj => Json.Obj(o.fields.filterNot(_._1 == "cwd") :+ ("cwd" -> Json.Str(dir)))
       case _ => Json.obj("cwd" -> Json.Str(dir))
+    // the reason the rule gives; not the list of the rules that did not apply
+    def first(why: String) = why.split("; ").headOption.getOrElse(why)
     guard.decide(Action(Json.Str(id), tool, args), j => j.decision match
       case Decision.Pass(_) => answer("allow", "")
-      case Decision.Ask(_, why) => answer("ask", why)
-      case Decision.Block(_, why) => answer("deny", why))
+      case Decision.Ask(_, why) => answer("ask", first(why))
+      case Decision.Block(_, why) => answer("deny", first(why)))
 
 object Judge:
   def apply(text: String)(using ExecutionContext): Either[String, Judge] =

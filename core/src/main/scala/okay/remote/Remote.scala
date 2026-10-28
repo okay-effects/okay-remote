@@ -16,6 +16,8 @@ trait Machine:
   def remove(file: String): Unit
   /** a directory's entries' names; none if it is not one */
   def list(dir: String): List[String]
+  /** a path as the system names it, its links followed (`/tmp` is `/private/tmp` on a Mac) */
+  def real(path: String): String
   def spawn(command: List[String], dir: String): Agent
   def log(text: String): Unit
 
@@ -95,7 +97,7 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
       if git(d) then List(d)
       else if depth == 0 then Nil
       else m.list(d).filterNot(_.startsWith(".")).sorted.flatMap(n => under(s"$d/$n", depth - 1))
-    roots.flatMap(r => under(r, 2)).distinct
+    roots.flatMap(r => under(m.real(r), 2)).distinct
 
   // ---- WHAT THE PAGE ASKS
 
@@ -119,7 +121,9 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
         else
           val id = m.randomHex(6)
           val model = if Models.all.exists(_._1 == s("model")) then s("model") else Models.all.head._1
-          val x = Session(id, s("project"), model, s("task").linesIterator.next().take(80), created = m.now,
+          val line = s("task").trim.linesIterator.next()
+          val title = if line.length <= 80 then line else line.take(79).reverse.dropWhile(_ != ' ').reverse.trim + " …"
+          val x = Session(id, s("project"), model, title, created = m.now,
             updated = m.now)
           sessions(id) = x
           kept(id) = Vector.empty
