@@ -217,7 +217,9 @@ object Page:
       case (Step.Decided(_, _, _), _) => Nil
       case (Step.Ended(ok, t, ms, cost, turns), i) =>
         val line = s"${if ok then "Done" else "Not done"} · ${ms / 1000} s · $turns turns" +
-          (if cost >= 0.01 then f" · $$$cost%.2f" else if cost > 0 then f" · $$$cost%.3f" else "")
+          // a local model costs nothing: Claude Code's sum is by Claude's prices
+          (if x.model.startsWith("local:") || cost <= 0 then "" else if cost >= 0.01 then f" · $$$cost%.2f"
+          else f" · $$$cost%.3f")
         List(Part.block(if ok then "end" else "end-failed")((Part.block("small")(Part.text(line)) ::
           (if !ok && t.nonEmpty then folded(s"end-$i", t, 300) else Nil))*))
       case (Step.Stopped(why), _) => List(Part.block("small")(Part.text(s"The agent stopped ($why).")))
