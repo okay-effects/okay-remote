@@ -32,8 +32,7 @@ phone (PWA) ──HTTP+SSE──▶ the daemon (JVM) ──spawns──▶ claud
 - **The policy**: Claude Code's `PreToolUse` hook (given with `--settings`, matcher `*`) posts each tool call to the
   daemon (`/hook/<session>`), which decides it by an okay-guard policy (okay-policy, the language of okay-guard):
   `allow` → the call goes; `deny` → it does not, the agent told why; `ask` → the phone is asked, the hook waits
-  for
-  the answer (10 minutes, then no). The call's arguments are the tool's input, and `cwd`, the project's directory.
+  for the answer (10 minutes, then no). The call's arguments are the tool's input, and `cwd`, the project's directory.
   The policy is `~/.okay-remote/policy.policy`, editable in the page; a default ships (`core/Defaults`).
 - **The page** (`web/`, an okay-ui program, like okay-guard's studio): Projects → a session as a conversation (your
   words, the agent's, tool cards with the decision's mark, a card waiting for you with Approve and Refuse), a box for
