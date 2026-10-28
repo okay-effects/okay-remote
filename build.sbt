@@ -67,3 +67,26 @@ fatJar := {
   IO.jar(Path.allSubpaths(tmp).toSeq, out, manifest, None)
   out
 }
+
+/** THE RELAY: a Cloudflare Worker — the page, and rooms joining a daemon and its phones (specs/remote.md) */
+lazy val relay = (project in file("relay")).enablePlugins(ScalaJSPlugin)
+  .settings(name := "okay-remote-relay", scalaJSLinkerConfig ~= (_.withModuleKind(ModuleKind.ESModule)))
+
+/** the relay, linked, with the page's files as text modules: `relay/dist` — then `npx wrangler deploy` */
+val relayDist = taskKey[File]("the relay in relay/dist")
+relayDist := {
+  val r = (relay / Compile / fullLinkJS / scalaJSLinkerOutputDirectory).value
+  val w = (web / Compile / fullLinkJS / scalaJSLinkerOutputDirectory).value
+  val _ = ((relay / Compile / fullLinkJS).value, (web / Compile / fullLinkJS).value)
+  val out = baseDirectory.value / "relay" / "dist"
+  IO.delete(out)
+  IO.copyFile(r / "main.js", out / "okay-remote-relay.js")
+  val files = (w * "*.js").get.filter(f => f.getName == "page.js" || f.getName.startsWith("internal-")) ++
+    (baseDirectory.value / "site" * "*").get
+  files.foreach(f => IO.copyFile(f, out / "web" / (f.getName + ".txt")))
+  val named = files.sortBy(_.getName).zipWithIndex
+  IO.write(out / "assets.js", "// the page's files, by name (sbt relayDist)\n" +
+    named.map { case (f, i) => s"""import f$i from "./web/${f.getName}.txt";""" }.mkString("\n") +
+    "\nexport default {\n" + named.map { case (f, i) => s"""  "${f.getName}": f$i,""" }.mkString("\n") + "\n};\n")
+  out
+}

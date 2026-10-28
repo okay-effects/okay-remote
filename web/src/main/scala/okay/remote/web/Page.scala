@@ -19,11 +19,12 @@ object Page:
 
   final case class Info(projects: List[String] = Nil, sessions: Vector[Session] = Vector.empty,
     models: List[(String, String)] = Nil, policy: String = "", policyError: String = "",
-    addresses: List[String] = Nil)
+    addresses: List[String] = Nil, pair: String = "", rozum: Boolean = false, claudeJailed: Boolean = false)
 
   final case class State(info: Info = Info(), place: String = "sessions", open: Option[String] = None,
     steps: Map[String, Vector[Step]] = Map.empty, waiting: Vector[Json] = Vector.empty, live: Option[Boolean] = None,
-    problem: Option[String] = None, unfolded: Set[String] = Set.empty, address: String = "", saved: Boolean = false):
+    problem: Option[String] = None, unfolded: Set[String] = Set.empty, address: String = "", saved: Boolean = false,
+    unpaired: Boolean = false, changes: Option[(String, String)] = None, note: Option[String] = None):
     def session: Option[Session] = open.flatMap(id => info.sessions.find(_.id == id))
     def waitsFor(call: String): Option[Json] = waiting.find(w => J.str(w, "call").contains(call))
 
@@ -39,9 +40,15 @@ object Page:
     case PolicySave(text: String)
     case Fold(key: String)
     case Tick
+    /** a rule made of the call, so that calls like it go at once */
+    case Always(call: String)
+    case Changes
+    case Unpair
 
   enum Ask:
     case Act(body: Json, after: (State, Either[String, Json]) => State)
+    /** the pairing given up here */
+    case Forget
 
   // ---- THE PROGRAM
 
@@ -56,7 +63,8 @@ object Page:
     show[Msg, Of](render(s).until(events.map(Msg.Came(_)))).flatMap { m =>
       val (next, asks) = step(s, m)
       asks.foldLeft(pure[State, Of](next))((p, ask) => p.flatMap(st => ask match
-        case Ask.Act(body, after) => live(Live.Act(body)).map(after(st, _))))
+        case Ask.Act(body, after) => live(Live.Act(body)).map(after(st, _))
+        case Ask.Forget => live(Live.Unpair()).map(_ => st)))
         .flatMap(loop(_, events))
     }
 
@@ -66,10 +74,20 @@ object Page:
 
   def step(s: State, m: Msg): (State, List[Ask]) = m match
     case Msg.Came(events) => (events.foldLeft(s)(came), Nil)
-    case Msg.Go(p) => (s.copy(place = p, problem = None, saved = false), Nil)
+    case Msg.Go(p) => (s.copy(place = p, problem = None, saved = false, note = None), Nil)
+    case Msg.Always(call) => (s.copy(problem = None), List(act("always", "call" -> Json.Str(call))((st, r) => r match
+        case Left(e) => st.copy(problem = Some(s"Not always allowed: $e"))
+        case Right(_) => st.copy(waiting = st.waiting.filterNot(w => J.str(w, "call").contains(call)),
+            note = Some("Allowed, and a rule added to the policy: calls like it now go at once.")))))
+    case Msg.Changes => s.open.fold((s, Nil))(id => (s.copy(place = "changes", problem = None),
+        List(act("diff", "session" -> Json.Str(id))((st, r) => r match
+          case Left(e) => st.copy(problem = Some(e))
+          case Right(j) =>
+            st.copy(changes = Some((J.str(j, "status").getOrElse(""), J.str(j, "diff").getOrElse(""))))))))
+    case Msg.Unpair => (s.copy(unpaired = true, live = Some(false)), List(Ask.Forget))
     case Msg.Tick => (s, Nil)
     case Msg.Fold(k) => (s.copy(unfolded = if s.unfolded(k) then s.unfolded - k else s.unfolded + k), Nil)
-    case Msg.Open(id) => (s.copy(place = "session", open = Some(id), problem = None),
+    case Msg.Open(id) => (s.copy(place = "session", open = Some(id), problem = None, note = None),
         List(act("open", "session" -> Json.Str(id))((st, r) => r match
           case Left(e) => st.copy(problem = Some(e))
           case Right(j) => st.copy(steps = st.steps + (id -> J.arr(j, "steps").flatMap(Step.fromJson)),
@@ -99,12 +117,14 @@ object Page:
   /** an event of the daemon, into the state */
   def came(s: State, e: (String, Json)): State = e match
     case ("live", Json.Bool(b)) => s.copy(live = Some(b))
+    case ("unpaired", _) => s.copy(unpaired = true)
     case ("hello", j) => s.copy(live = Some(true), info = Info(
         J.arr(j, "projects").toList.collect { case Json.Str(p) => p },
         J.arr(j, "sessions").flatMap(Session.fromJson),
         J.arr(j, "models").toList.flatMap(m => for i <- J.str(m, "id"); l <- J.str(m, "label") yield i -> l),
         J.str(j, "policy").getOrElse(""), J.str(j, "policyError").getOrElse(""),
-        J.arr(j, "addresses").toList.collect { case Json.Str(a) => a }))
+        J.arr(j, "addresses").toList.collect { case Json.Str(a) => a }, J.str(j, "pair").getOrElse(""),
+        J.get(j, "jail").exists(J.bool(_, "rozum")), J.get(j, "jail").exists(J.bool(_, "claude"))))
     case ("session", j) => Session.fromJson(j).fold(s)(upsert(s, _))
     case ("step", j) =>
       (J.str(j, "session"), J.get(j, "step").flatMap(Step.fromJson)) match
@@ -130,6 +150,17 @@ object Page:
     List("sessions" -> "Sessions", "new" -> "New", "policy" -> "Policy", "phone" -> "Phone")
 
   def render(s: State): Screen[Msg] =
+    if s.unpaired then unpaired else rendered(s)
+
+  def unpaired: Screen[Msg] = Screen[Msg]("okay-remote", List(
+    Part.block("top")(Part.block("brand")(Part.text("okay-remote")), Part.block("live-off")(Part.text("not paired"))),
+    Part.block("pairing")(Part.text("Pair this phone with your computer"),
+      Part.text("On your computer: java -jar okay-remote.jar --relay, open the address it prints, then Phone. " +
+        "Scan its QR code with this phone's camera. The code holds a secret that never leaves your devices: the " +
+        "relay " +
+        "passes your sessions sealed end to end, and cannot read them."))), Nil)
+
+  def rendered(s: State): Screen[Msg] =
     val waits = s.waiting.size
     val nav = places.map((p, label) => Button(label + (if p == "sessions" && waits > 0 then s" · $waits" else ""),
       if s.place == p || (p == "sessions" && s.place == "session") then Style.Primary
@@ -141,12 +172,13 @@ object Page:
     val head = List(Part.block(s"place-${s.place}")(),
       Part.block("top")(Part.block("brand")(Part.text("okay-remote")), Part.block(s"live-$state")(Part.text(word))),
       Part.block("places")(Part.slot("places")))
-    val problem = s.problem.toList.map(Part.problem)
+    val problem = s.problem.toList.map(Part.problem) ++ s.note.toList.map(Part.info)
     val (parts, buttons) = s.place match
       case "session" => s.session.fold(sessions(s))(session(s, _))
       case "new" => fresh(s)
       case "policy" => policy(s)
       case "phone" => phone(s)
+      case "changes" => s.session.fold(sessions(s))(changes(s, _))
       case _ => sessions(s)
     Screen[Msg]("okay-remote", head ++ problem ++ parts, nav ++ buttons)
 
@@ -208,6 +240,7 @@ object Page:
           List(Part.block(if e then "result-error" else "result")(folded(s"r-$id", t, 300)*)))
         if waits then
           buttons += Button("Approve", Style.Primary)(Msg.Verdict(id, true): Msg).at(s"w-$id")
+          buttons += Button("Always allow")(Msg.Always(id): Msg).at(s"w-$id")
           buttons += Button("Refuse", Style.Danger)(Msg.Verdict(id, false): Msg).at(s"w-$id")
         List(Part.block(s"call-$mark")((List(Part.block("call-head")(Part.text(name)),
           Part.block("call-gist")(Part.text(gist(name, input)))) ++
@@ -228,10 +261,23 @@ object Page:
       Part.block("small")(Part.text(s"${short(x.project)} · ${modelLabel(s, x.model)}" +
         (if x.busy then " · working" else if x.running then " · ready" else " · stopped"))))
     val next = Form.one(Field.longText(if x.running then "Next" else "Next (the agent starts again)"))
-    val acts = List(Button.submit("Send", next)(Msg.Say(_): Msg).at("composer")) ++
+    val acts = List(Button.submit("Send", next)(Msg.Say(_): Msg).at("composer"),
+      Button("Changes")(Msg.Changes: Msg).at("composer")) ++
       (if x.running then List(Button("Stop", Style.Danger)(Msg.Stop: Msg).at("composer"))
       else List(Button("Forget", Style.Danger)(Msg.Forget: Msg).at("composer")))
     (head :: items ++ List(Part.block("composer")(next, Part.slot("composer"))), buttons.result() ++ acts)
+
+  /** CHANGES: what the agent changed in the project, as git says it */
+  def changes(s: State, x: Session): (List[Part], List[Button[Msg]]) =
+    val back = Button("Back to the session", Style.Primary)(Msg.Open(x.id): Msg).at("changes")
+    val again = Button("Read again")(Msg.Changes: Msg).at("changes")
+    val body = s.changes match
+      case None => List(Part.block("small")(Part.text("Asking git…")))
+      case Some((status, diff)) =>
+        List(Part.block("small")(Part.text(s"${short(x.project)} · git status")),
+          Part.block("result")(Part.text(if status.trim.isEmpty then "nothing changed" else status))) ++
+          (if diff.trim.isEmpty then Nil else List(Part.block("diff")(Part.text(diff))))
+    (Part.block("session-head")(Part.text(x.title)) :: Part.slot("changes") :: body, List(back, again))
 
   def fresh(s: State): (List[Part], List[Button[Msg]]) =
     if s.info.projects.isEmpty then (List(Part.info("No projects found: a directory with .git under the roots " +
@@ -246,17 +292,33 @@ object Page:
     val notes = (if s.info.policyError.nonEmpty then List(Part.problem(s"It does not compile, so every call is " +
       s"refused: ${s.info.policyError}")) else Nil) ++ (if s.saved then List(Part.info("Saved: it decides the " +
       "next call.")) else Nil)
+    val sandbox = "The sandbox: " + (if !s.info.rozum then "none — install rozum to run the agents jailed (writes " +
+      "only in the project, secrets unreadable)" else "rozum — local models in it; Claude " +
+      (if s.info.claudeJailed then "in it too" else "outside it (a token from `claude setup-token` in " +
+        "~/.okay-remote/claude-token jails it too)"))
     (List(Part.block("small")(Part.text("Every tool call of every session is decided by this policy, in " +
-      "okay-guard's language: allow, ask (your phone), or deny. cwd is the project's directory."))) ++ notes ++
-      List(Part.block("policy")(form)), List(Button.submit("Save", form)(Msg.PolicySave(_): Msg)))
+      "okay-guard's language: allow, ask (your phone), or deny. cwd is the project's directory.")),
+      Part.block("small")(Part.text(sandbox))) ++ notes ++ List(Part.block("policy")(form)),
+      List(Button.submit("Save", form)(Msg.PolicySave(_): Msg)))
 
   def phone(s: State): (List[Part], List[Button[Msg]]) =
     val token = s.address.split("\\?t=").drop(1).headOption.getOrElse("")
     val port = s.address.split("://").drop(1).headOption.flatMap(_.split('/').headOption).flatMap(_.split(':')
       .drop(1).headOption).getOrElse("7788")
-    val urls = s.info.addresses.map(a => s"http://$a:$port/?t=$token")
-    if urls.isEmpty then (List(Part.info("To open this on your phone, start the daemon with --lan: your phone on " +
-      "the same network (or Tailscale) reaches it then, by a QR code shown here.")), Nil)
-    else (urls.map(u => Part.block("qr")(Part.qr(u, "this page on your phone"), Part.block("address")(Part.text(u)))) :+
-      Part.block("small")(Part.text("Whoever has this address runs agents on this machine: show it to no one else.")),
-      Nil)
+    val lan = s.info.addresses.map(a => s"http://$a:$port/?t=$token")
+    val warning = Part.block("small")(Part.text("Whoever has this code runs agents on this machine: show it to " +
+      "no one " +
+      "else. To shut every paired phone out: okay-remote --pair-again."))
+    if s.address.isEmpty then
+      // through the relay: this phone is paired
+      (List(Part.info("This phone is paired: your sessions reach it through the relay, sealed end to end."),
+        Part.slot("unpair")), List(Button("Unpair this phone", Style.Danger)(Msg.Unpair: Msg).at("unpair")))
+    else if s.info.pair.nonEmpty then
+      (List(Part.block("small")(Part.text("Scan it with your phone: it works from anywhere, through the relay, " +
+        "sealed end to end.")), Part.block("qr")(Part.qr(s.info.pair, "pair your phone"))) ++
+        lan.map(u => Part.block("small")(Part.text(s"On the same network: $u"))) :+ warning, Nil)
+    else if lan.nonEmpty then
+      (lan.map(u => Part.block("qr")(Part.qr(u, "this page on your phone"), Part.block("address")(Part.text(u)))) :+
+        warning, Nil)
+    else (List(Part.info("To work from your phone, start okay-remote with --relay (from anywhere, through the " +
+      "relay, sealed end to end) or --lan (on the same network); a QR code shows here then.")), Nil)

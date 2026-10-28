@@ -3,15 +3,20 @@ package okay.remote.daemon
 import okay.effects.json.{Descent, Json}
 import okay.guard.jvm.JvmOs
 import okay.guard.local.{Stream, Web, WebRequest}
-import okay.remote.{Agent, Judge, Machine, Remote, Secret}
+import okay.remote.{Agent, J, Jail, Judge, Machine, Remote, Secret}
+import java.nio.charset.StandardCharsets.UTF_8
 import scala.collection.mutable
+import scala.jdk.CollectionConverters.*
 
 /** THE DAEMON: `java -jar okay-remote.jar [--port 7788] [--lan]` — the remote over the JVM (okay-guard's `JvmOs`, its
  * one loop), the page's server: the page, its events, its acts — and the agents' hook */
 object Main:
-  def main(args: Array[String]): Unit = JvmOs.loop.execute(() => new Daemon(args.toList).start())
+  def main(args: Array[String]): Unit = JvmOs.loop.execute(() =>
+    if args.headOption.contains("verify") then Daemon.verify()
+    else new Daemon(args.toList).start())
 
-/** the JVM as the remote's machine: okay-guard's `JvmOs`, and a process started in a directory */
+/** the JVM as the remote's machine: okay-guard's `JvmOs` (its loop, its files), and processes started here in a
+ * directory with an environment — their output read on threads of their own, handed to the loop */
 object OnJvm extends Machine:
   def now: Long = JvmOs.now
   def later(ms: Int)(f: => Unit): Unit = JvmOs.later(ms)(f)
@@ -25,16 +30,58 @@ object OnJvm extends Machine:
   def real(path: String): String =
     scala.util.Try(java.nio.file.Paths.get(path).toRealPath().toString).getOrElse(path)
   def log(text: String): Unit = JvmOs.err(text)
-  def spawn(command: List[String], dir: String): Agent =
-    // the shell goes to the directory and becomes the command: its arguments as they are, never a shell's words
-    val p = JvmOs.spawn(List("/bin/sh", "-c", "cd \"$0\" && exec \"$@\"", dir) ++ command)
+
+  private def onLoop(f: => Unit): Unit = JvmOs.loop.execute(() => f)
+  private def thread(name: String)(f: => Unit): Unit =
+    val t = new Thread(() => f, name); t.setDaemon(true); t.start()
+  private def started(command: List[String], dir: String, env: Map[String, String]) = scala.util.Try {
+    val b = new ProcessBuilder(command.asJava).directory(new java.io.File(dir))
+    env.foreach((k, v) => b.environment().put(k, v))
+    b.redirectError(ProcessBuilder.Redirect.INHERIT).start()
+  }
+
+  def spawn(command: List[String], dir: String, env: Map[String, String]): Agent =
+    var onLine: String => Unit = _ => ()
+    var onEnd: String => Unit = _ => ()
+    val p = started(command, dir, env)
+    p match
+      case scala.util.Failure(e) => JvmOs.later(0)(onEnd(s"not started: ${e.getMessage}"))
+      case scala.util.Success(proc) => thread("okay-remote-agent") {
+          val r = new java.io.BufferedReader(new java.io.InputStreamReader(proc.getInputStream, UTF_8))
+          try Iterator.continually(r.readLine()).takeWhile(_ != null).filter(_.trim.nonEmpty)
+            .foreach(l => onLoop(onLine(l)))
+          catch { case _: java.io.IOException => () }
+          val code = proc.waitFor()
+          onLoop(onEnd(s"ended ($code)"))
+        }
+    val stdin = p.toOption.map(_.getOutputStream)
     new Agent:
-      def send(line: String): Unit = p.send(line)
-      def lines(f: String => Unit): Unit = p.lines(f)
-      def ended(f: String => Unit): Unit =
-        p.ended(code => f(s"ended ($code)"))
-        p.failed(e => f(s"not started: $e"))
-      def kill(): Unit = p.kill()
+      def send(line: String): Unit = stdin.foreach { o =>
+        try { o.write((line + "\n").getBytes(UTF_8)); o.flush() } catch { case _: java.io.IOException => () }
+      }
+      def lines(f: String => Unit): Unit = onLine = f
+      def ended(f: String => Unit): Unit = onEnd = f
+      // the whole tree: rozum's agent is its child
+      def kill(): Unit = p.foreach { proc =>
+        proc.descendants().forEach(d => { val _ = d.destroy() }); proc.destroy()
+      }
+
+  def run(command: List[String], dir: String, limit: Int)(done: (Int, String) => Unit): Unit =
+    started(command, dir, Map.empty) match
+      case scala.util.Failure(e) => JvmOs.later(0)(done(-1, s"not started: ${e.getMessage}"))
+      case scala.util.Success(proc) => thread("okay-remote-run") {
+          proc.getOutputStream.close()
+          val out = new String(proc.getInputStream.readNBytes(limit), UTF_8)
+          proc.getInputStream.close()
+          val code = proc.waitFor()
+          onLoop(done(code, out))
+        }
+
+  /** what this machine has for the jail: rozum on the PATH, a token for Claude in `~/.okay-remote/claude-token` */
+  def jail(base: String): Jail =
+    val rozum = sys.env.getOrElse("PATH", "").split(':').exists(d => java.nio.file.Files.isExecutable(
+      java.nio.file.Paths.get(d, "rozum")))
+    Jail(rozum, read(s"$base/claude-token").map(_.trim).filter(_.nonEmpty))
 
 final class Daemon(args: List[String]):
   private def opt(name: String): Option[String] = args.dropWhile(_ != name).drop(1).headOption
@@ -45,13 +92,45 @@ final class Daemon(args: List[String]):
   private def tell(event: String, data: Json): Unit =
     val text = s"event: $event\ndata: ${Json.print(data)}\n\n"
     pages.toList.foreach(_.write(text))
-  private val remote = Remote(OnJvm, () => port, tell, Judge(_))
+    relay.foreach(_.send("event", "name" -> Json.Str(event), "data" -> data))
+  private val remote = Remote(OnJvm, () => port, tell, Judge(_), () => jail)
+  private var jail = Jail()
   private val token: String = OnJvm.read(s"${remote.base}/token").map(_.trim).filter(_.length >= 32).getOrElse {
     val t = OnJvm.randomHex(24); OnJvm.write(s"${remote.base}/token", t); t
   }
 
+  // ---- THE RELAY (specs/remote.md): on with `--relay [url]`, remembered; `--pair-again` a new secret
+  private val relayFile = s"${remote.base}/relay.json"
+  private val kept = OnJvm.read(relayFile).flatMap(t => okay.effects.json.Descent.parse(t).toOption)
+  private val relayUrl: String = args.dropWhile(_ != "--relay").drop(1).headOption.filterNot(_.startsWith("--"))
+    .orElse(kept.flatMap(J.str(_, "url"))).getOrElse(Daemon.hosted)
+  private val relayOn: Boolean = !args.contains("--no-relay") && (args.contains("--relay") ||
+    kept.exists(J.bool(_, "on")))
+  private val keys: Keys = (if args.contains("--pair-again") then None
+    else kept.flatMap(J.str(_, "secret")).flatMap(Keys.of)).getOrElse(Keys.fresh())
+  private var relay: Option[Relay] = None
+
+  private def phones(kind: String, j: Json): Unit = kind match
+    case "hello" => relay.foreach(_.send("event", "name" -> Json.Str("hello"), "data" -> remote.snapshot))
+    case "act" =>
+      val id = J.get(j, "id").getOrElse(Json.Null)
+      remote.act(J.get(j, "body").getOrElse(Json.Null)) { r =>
+        relay.foreach(_.send("answer", "id" -> id, "ok" -> Json.Bool(r.isRight),
+          "body" -> r.fold(e => Json.obj("error" -> Json.Str(e)), identity)))
+      }
+    case _ => ()
+
   def start(): Unit =
+    jail = OnJvm.jail(remote.base)
+    OnJvm.write(relayFile, Json.print(Json.obj("on" -> Json.Bool(relayOn), "url" -> Json.Str(relayUrl),
+      "secret" -> Json.Str(keys.text))))
     remote.start()
+    if relayOn then
+      val r = Relay(relayUrl, keys, phones, said => JvmOs.err(s"okay-remote: $said\n"))
+      relay = Some(r)
+      r.start()
+    JvmOs.err(s"okay-remote: the sandbox: ${if jail.rozum then "rozum" else "none (rozum is not installed)"}" +
+      s"; Claude ${if jail.claudeJailed then "in it" else "outside it (no ~/.okay-remote/claude-token)"}\n")
     JvmOs.serve(if lan then "0.0.0.0" else "127.0.0.1", port)(serve) { p =>
       port = p
       val here = s"http://127.0.0.1:$p/?t=$token"
@@ -63,9 +142,11 @@ final class Daemon(args: List[String]):
     }
 
   /** what a page is told first: the remote's snapshot, and where a phone reaches this daemon (`--lan`) */
-  private def hello: Json = remote.snapshot match
-    case o: Json.Obj => Json.Obj(o.fields :+ ("addresses" -> Json.Arr((if lan then JvmOs.lanAddresses else Nil)
-        .map(Json.Str(_)).toVector)))
+  private def hello(local: Boolean): Json = remote.snapshot match
+    case o: Json.Obj => Json.Obj(o.fields ++ Vector(
+        "addresses" -> Json.Arr((if lan then JvmOs.lanAddresses else Nil).map(Json.Str(_)).toVector),
+        // the pairing's link (its secret in the fragment) only to a page on this very machine
+        "pair" -> Json.Str(if local && relayOn then s"${relayUrl.stripSuffix("/")}/#s=${keys.text}" else "")))
     case other => other
 
   private val json = List("Content-Type" -> "application/json", "Cache-Control" -> "no-store")
@@ -103,13 +184,30 @@ final class Daemon(args: List[String]):
       val s = w.stream(List("Content-Type" -> "text/event-stream", "Cache-Control" -> "no-store"))
       pages += s
       s.closed(() => pages -= s)
-      s.write(s"event: hello\ndata: ${Json.print(hello)}\n\n")
+      val host = r.headers.getOrElse("host", "")
+      s.write(s"event: hello\ndata: ${Json.print(hello(host.startsWith("127.0.0.1:") ||
+        host.startsWith("localhost:")))}\n\n")
     else if r.method == "POST" && r.path == "/act" then
       if !sameOrigin(r) then error(w, 403, "not from this page")
       else Descent.parse(r.body) match
         case Left(_) => error(w, 400, "not JSON")
-        case Right(body) => remote.act(body).fold(error(w, 400, _), answer(w, 200, _))
+        case Right(body) => remote.act(body)(_.fold(error(w, 400, _), answer(w, 200, _)))
     else error(w, 404, "no such place")
+
+object Daemon:
+  val hosted = "https://okay-remote.okay-effects.workers.dev"
+
+  /** `okay-remote verify`: every session's record checked, its chain unbroken or where it breaks */
+  def verify(): Unit =
+    given scala.concurrent.ExecutionContext = JvmOs.ec
+    val r = Remote(OnJvm, () => 0, (_, _) => (), Judge(_))
+    r.start()
+    val checked = r.verify
+    checked.foreach {
+      case (id, Right(n)) => JvmOs.out(s"$id: $n records, the chain unbroken\n")
+      case (id, Left(e)) => JvmOs.out(s"$id: BROKEN — $e\n")
+    }
+    JvmOs.exit(if checked.forall(_._2.isRight) then 0 else 1)
 
 /** THE PAGE'S FILES: its html, manifest, worker, icon (site/), its modules (web/, linked) — in the jar */
 object Page:

@@ -103,5 +103,11 @@ object Css:
        |.okay-mark-policy textarea { min-height: 60vh; font: 13px/1.45 ui-monospace, Menlo, monospace; }
        |.okay-mark-new textarea { min-height: 120px; font-size: 16px; }
        |.okay-mark-qr { text-align: center; }
+       |body .okay-face .okay-mark-diff > .okay-group { background: var(--okay-bg); border-radius: 8px;
+       |  padding: 6px 8px; overflow-x: auto; }
+       |.okay-mark-diff p { font: 12px/1.45 ui-monospace, Menlo, monospace; white-space: pre; overflow-wrap: normal; }
+       |body .okay-face .okay-mark-pairing > .okay-group { padding: 28px 18px; border: 1px dashed var(--okay-border);
+       |  border-radius: var(--or-r); gap: 12px; }
+       |.okay-mark-pairing p:first-child { font-weight: 700; font-size: 18px; }
        |.okay-mark-address p { font: 12px ui-monospace, Menlo, monospace; overflow-wrap: anywhere; }
        |""".stripMargin

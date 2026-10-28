@@ -11,5 +11,11 @@ Read before anything else; then `specs/remote.md`. A change of design is a chang
   `Live`.
 - Every tool call goes through the hook; the daemon unreachable, the call is refused (exit 2). Never a mode that
   skips it.
-- `sbt coreJVM/test`; `sbt fatJar` then `node scripts/e2e/phone.js` (a real Claude Haiku run, the page at a phone's
-  size, screenshots in /tmp/or-*.png). Lines at most 120 wide. Commits: plain messages, no attribution trailers.
+- The relay (`relay/`, a Cloudflare Worker) KEEPS NOTHING and READS NOTHING: no storage, frames sealed end to end;
+  the pairing's secret only in the QR's fragment and the two ends' own storage. Never a key, a frame's text or a
+  session in the relay.
+- `sbt coreJVM/test`; `sbt fatJar` then `scripts/e2e/security.sh` (after any change to the daemon's server) and
+  `node scripts/e2e/phone.js`; `sbt relayDist`, `npx wrangler dev --port 8799` in relay/, `node
+  scripts/e2e/relay.js` (real Claude Haiku runs, the page at a phone's size, screenshots in /tmp/or-*.png). Deploy
+  the relay: `relay/deploy.sh` (relay/.env, never committed). Lines at most 120 wide. Commits: plain messages, no
+  attribution trailers.

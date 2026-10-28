@@ -1,0 +1,15 @@
+# okay-remote's relay: `sbt relayDist`, then `npx wrangler deploy` (or ./deploy.sh)
+name = "okay-remote"
+main = "entry.js"
+compatibility_date = "2026-10-01"
+
+rules = [{ type = "Text", globs = ["**/*.txt"], fallthrough = true }]
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+# the rooms keep nothing: memory and the sockets' attachments only (the free plan wants SQLite classes; unused)
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
