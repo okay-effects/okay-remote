@@ -22,6 +22,8 @@ class RemoteSuite extends munit.FunSuite:
     def home = "/h"
     def read(f: String) = files.get(f)
     def write(f: String, t: String) = files(f) = t
+    def save(f: String, t: String) = files(f) = t
+    def onPath(name: String) = name == "claude"
     def append(f: String, t: String) = files(f) = files.getOrElse(f, "") + t
     def remove(f: String) = { files.remove(f); () }
     def list(d: String) = d match

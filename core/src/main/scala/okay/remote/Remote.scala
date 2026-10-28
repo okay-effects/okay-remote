@@ -11,7 +11,12 @@ trait Machine:
   def randomHex(bytes: Int): String
   def home: String
   def read(file: String): Option[String]
+  /** written readable by its owner alone (the daemon's own files) */
   def write(file: String, text: String): Unit
+  /** a project's file written as files are (an agent's work) */
+  def save(file: String, text: String): Unit
+  /** a command of this name on the PATH */
+  def onPath(name: String): Boolean
   def append(file: String, text: String): Unit
   def remove(file: String): Unit
   /** a directory's entries' names; none if it is not one */
@@ -47,6 +52,13 @@ object Session:
 
 /** THE MODELS A SESSION MAY RUN ON: Claude's, and the local ones through rozum */
 object Models:
+  /** what a session may run on here: Claude Code with Claude or a local model, and the ACP agents installed */
+  def here(m: Machine): List[(String, String)] =
+    (if m.onPath("claude") then all else Nil) ++
+      Agents.all.filter(_.needs.forall(m.onPath)).map(a => s"acp:${a.id}" -> a.label)
+  /** what goes through the policy for a session on it */
+  def through(model: String): String =
+    Agents.of(model).fold("every tool call (Claude Code's hook)")(_.through)
   val all: List[(String, String)] = List(
     "claude:sonnet" -> "Claude Sonnet", "claude:opus" -> "Claude Opus", "claude:haiku" -> "Claude Haiku",
     "local:mlx-community:Qwen3.6-35B-A3B-4bit" -> "Local · Qwen3.6 35B (rozum)",
@@ -83,7 +95,7 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
   private def file(s: String) = s"$base/$s"
   private val sessions = mutable.LinkedHashMap.empty[String, Session]
   private val kept = mutable.Map.empty[String, Vector[Step]]
-  private final case class Live(agent: Agent, key: String)
+  private final case class Live(agent: Agent, key: String, acp: Option[AcpSession] = None)
   private val live = mutable.Map.empty[String, Live]
   private final case class Wait(session: String, id: String, tool: String, input: Json, why: String,
     answer: (String, String) => Unit)
@@ -117,7 +129,8 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
   def snapshot: Json = Json.Obj(Vector(
     "projects" -> Json.Arr(projects.map(Json.Str(_)).toVector),
     "sessions" -> Json.Arr(sessions.values.toVector.reverse.map(s => summary(s).toJson)),
-    "models" -> Json.Arr(Models.all.map((k, l) => Json.obj("id" -> Json.Str(k), "label" -> Json.Str(l))).toVector),
+    "models" -> Json.Arr(Models.here(m).map((k, l) => Json.obj("id" -> Json.Str(k), "label" -> Json.Str(l),
+      "through" -> Json.Str(Models.through(k)))).toVector),
     "policy" -> Json.Str(policy), "policyError" -> Json.Str(judge.left.getOrElse("")),
     "jail" -> Json.obj("rozum" -> Json.Bool(jail().rozum), "claude" -> Json.Bool(jail().claudeJailed))))
 
@@ -139,10 +152,12 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
           "waiting" -> Json.Arr(waits.values.filter(_.session == x.id).map(waitJson).toVector))))
       case "new" =>
         if !projects.contains(s("project")) then Left("not a project here")
+        else if Models.here(m).isEmpty then Left("no coding agent is installed here")
         else if s("task").trim.isEmpty then Left("say what to do")
         else
           val id = m.randomHex(6)
-          val model = if Models.all.exists(_._1 == s("model")) then s("model") else Models.all.head._1
+          val offered = Models.here(m)
+          val model = if offered.exists(_._1 == s("model")) then s("model") else offered.headOption.fold("")(_._1)
           val line = s("task").trim.linesIterator.next()
           val title = if line.length <= 80 then line
             else line.take(79).reverse.dropWhile(_ != ' ').reverse.trim + " …"
@@ -153,6 +168,7 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
           say(id, s("task")).map(_ => summary(sessions(id)).toJson)
       case "say" => say(s("session"), s("text")).map(_ => Json.Obj.empty)
       case "stop" => live.remove(s("session")).fold(Left("not running")) { l =>
+          l.acp.foreach(_.cancel())
           l.agent.kill(); Right(Json.Obj.empty)
         }
       case "verdict" => verdict(s("call"), bool(body, "approve"), s("why"))
@@ -219,13 +235,53 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
     else sessions.get(id).toRight("no such session").map { x =>
       if !live.contains(id) then run(x)
       record(id, Step.You(text))
-      live.get(id).foreach(_.agent.send(Json.print(Json.Obj(Vector("type" -> Json.Str("user"),
-        "message" -> Json.obj("role" -> Json.Str("user"), "content" -> Json.Str(text)))))))
+      live.get(id).foreach(l => l.acp match
+        case Some(a) => a.prompt(text)
+        case None => l.agent.send(Json.print(Json.Obj(Vector("type" -> Json.Str("user"),
+            "message" -> Json.obj("role" -> Json.Str("user"), "content" -> Json.Str(text)))))))
       sessions(id) = sessions(id).copy(busy = true, updated = m.now)
       changed(id)
     }
 
-  private def run(x: Session): Unit =
+  private def run(x: Session): Unit = Agents.of(x.model) match
+    case Some(kind) => runAcp(x, kind)
+    case None => runClaude(x)
+
+  /** an agent over ACP: started in the project, its files and commands through the gate, its updates the steps */
+  private def runAcp(x: Session, kind: AgentKind): Unit =
+    val agent = m.spawn(kind.command, x.project)
+    // the agent's commands, run here: in rozum's jail where there is one (writes in the project only, no secrets)
+    def command(cmd: String, dir: String): Agent =
+      val sh = List("/bin/sh", "-c", cmd + " 2>&1")
+      m.spawn(if jail().rozum then List("rozum", "launch", "--no-model", "--") ++ sh else sh, dir)
+    val acp = AcpSession(m, agent, kind, x.project, x.agent, (call, tool, input) => gate(x.id, call, tool, input),
+      st => stepped(x.id, st), command)
+    live(x.id) = Live(agent, m.randomHex(16), Some(acp))
+    sessions(x.id) = x.copy(running = true)
+    ended(x.id, agent)
+    acp.start()
+
+  /** a step of a session's agent: kept, told; its start names the agent's session (to go on with later) */
+  private def stepped(id: String, st: Step): Unit =
+    st match
+      case Step.Began(a, _) if a.nonEmpty && sessions.get(id).exists(_.agent != a) =>
+        sessions(id) = sessions(id).copy(agent = a); save(id)
+      case Step.Ended(_, _, _, _, _) => sessions.get(id).foreach(x => sessions(id) = x.copy(busy = false))
+        changed(id)
+      case _ => ()
+    if sessions.contains(id) then record(id, st)
+
+  private def ended(id: String, agent: Agent): Unit =
+    agent.ended { why =>
+      if live.get(id).exists(_.agent eq agent) then live.remove(id)
+      waits.filter(_._2.session == id).keys.toList.foreach(k => waits.remove(k).foreach(_.answer("deny", "ended")))
+      if sessions.contains(id) then
+        record(id, Step.Stopped(why))
+        sessions(id) = sessions(id).copy(running = false, busy = false)
+        changed(id)
+    }
+
+  private def runClaude(x: Session): Unit =
     val key = m.randomHex(16)
     // every tool call through the hook; the daemon gone, the call is not done (exit 2: refused, the agent told)
     val hook = s"curl -sf --max-time ${askFor / 1000 + 60} -X POST -H content-type:application/json " +
@@ -238,22 +294,8 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
     val agent = m.spawn(command, x.project, env)
     live(x.id) = Live(agent, key)
     sessions(x.id) = x.copy(running = true)
-    agent.lines(l => Step.ofAgent(l).foreach { st =>
-      st match
-        case Step.Began(a, _) if a.nonEmpty && a != sessions(x.id).agent =>
-          sessions(x.id) = sessions(x.id).copy(agent = a); save(x.id)
-        case Step.Ended(_, _, _, _, _) => sessions(x.id) = sessions(x.id).copy(busy = false); changed(x.id)
-        case _ => ()
-      record(x.id, st)
-    })
-    agent.ended { why =>
-      if live.get(x.id).exists(_.agent eq agent) then live.remove(x.id)
-      waits.filter(_._2.session == x.id).keys.toList.foreach(k => waits.remove(k).foreach(_.answer("deny", "ended")))
-      if sessions.contains(x.id) then
-        record(x.id, Step.Stopped(why))
-        sessions(x.id) = sessions(x.id).copy(running = false, busy = false)
-        changed(x.id)
-    }
+    agent.lines(l => Step.ofAgent(l).foreach(stepped(x.id, _)))
+    ended(x.id, agent)
 
   // ---- THE HOOK: a tool call the agent is about to make, decided
 
@@ -267,23 +309,28 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
       def out(verdict: String, why: String) = answer(Right(Json.obj("hookSpecificOutput" -> Json.Obj(Vector(
         "hookEventName" -> Json.Str("PreToolUse"), "permissionDecision" -> Json.Str(verdict),
         "permissionDecisionReason" -> Json.Str(if why.nonEmpty then why else s"okay-remote: $verdict"))))))
-      judge match
-        case Left(e) => record(id, Step.Decided(call, "deny", s"the policy does not compile: $e"))
-          out("deny", s"the policy does not compile: $e")
-        case Right(j) => j.decide(call, tool, input, sessions(id).project) { (verdict, why) =>
-            record(id, Step.Decided(call, verdict, why))
-            if verdict != "ask" then out(verdict, why)
-            else
-              val w = Wait(id, call, tool, input, why, out)
-              waits(call) = w
-              tell("waiting", waitJson(w))
+      gate(id, call, tool, input)(out)
+
+  /** THE GATE: a call decided by the policy — allowed or denied at once, or asked of a person (the phone) and
+   * answered when they answer, or refused when the time is up. Every decision a step of the session */
+  def gate(id: String, call: String, tool: String, input: Json)(answer: (String, String) => Unit): Unit =
+    judge match
+      case Left(e) => record(id, Step.Decided(call, "deny", s"the policy does not compile: $e"))
+        answer("deny", s"the policy does not compile: $e")
+      case Right(j) => j.decide(call, tool, input, sessions.get(id).fold("")(_.project)) { (verdict, why) =>
+          record(id, Step.Decided(call, verdict, why))
+          if verdict != "ask" then answer(verdict, why)
+          else
+            val w = Wait(id, call, tool, input, why, answer)
+            waits(call) = w
+            tell("waiting", waitJson(w))
+            changed(id)
+            m.later(askFor)(waits.remove(call).foreach { w =>
+              record(id, Step.Decided(call, "timed out", ""))
+              w.answer("deny", "no one answered in time")
               changed(id)
-              m.later(askFor)(waits.remove(call).foreach { w =>
-                record(id, Step.Decided(call, "timed out", ""))
-                w.answer("deny", "no one answered in time")
-                changed(id)
-              })
-          }
+            })
+        }
 
   /** each session's record checked: its chain unbroken, or where it breaks */
   def verify: List[(String, Either[String, Int])] = sessions.keys.toList.sorted.map { id =>
