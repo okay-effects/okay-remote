@@ -83,6 +83,14 @@ final class Relay(base: String, keys: Keys, got: (String, Json) => Unit, said: S
     synchronized { sending = sending.handle((_, _) => ()).thenCompose(_ => ws.sendText("ping", true)) }; beat(ws)
   })
 
+  /** another daemon dialled with this pairing and took the room: it is that one's now — not taken back, or the two
+   * would take it from each other for ever */
+  private def taken(): Unit =
+    socket = None
+    up = false
+    said("another okay-remote with this pairing took the relay: this one stops using it (one machine, one " +
+      "pairing; `--pair-again` on one of them to pair them apart)")
+
   private def dropped(why: String): Unit =
     socket = None
     if up then said(s"the relay is lost ($why); dialling again")
@@ -102,6 +110,7 @@ final class Relay(base: String, keys: Keys, got: (String, Json) => Unit, said: S
       ws.request(1)
       null
     override def onClose(ws: WebSocket, code: Int, reason: String): CompletionStage[?] =
-      JvmOs.loop.execute(() => if socket.exists(_ eq ws) then dropped(s"closed $code $reason")); null
+      JvmOs.loop.execute(() => if socket.exists(_ eq ws) then
+        if code == 4000 then taken() else dropped(s"closed $code $reason")); null
     override def onError(ws: WebSocket, e: Throwable): Unit =
       JvmOs.loop.execute(() => if socket.exists(_ eq ws) then dropped(Option(e.getMessage).getOrElse(e.toString)))

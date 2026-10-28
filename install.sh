@@ -45,7 +45,8 @@ service() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$label</string>
-  <key>ProgramArguments</key><array><string>$(command -v java)</string><string>-jar</string><string>$jar</string>$args</array>
+  <key>ProgramArguments</key><array><string>$(command -v java)</string><string>-Duser.home=$HOME</string>
+    <string>-jar</string><string>$jar</string>$args</array>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>$PATH</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -75,7 +76,7 @@ PLIST
   esac
 }
 if [ "${1:-}" = service ]; then shift; service "$@"; exit; fi
-exec java -jar "$jar" "$@"
+exec java -Duser.home="$HOME" -jar "$jar" "$@"
 LAUNCHER
 chmod +x "$cmd_dir/okay-remote"
 
