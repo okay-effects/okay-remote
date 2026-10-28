@@ -18,7 +18,8 @@ object Page:
   private def live[X](asked: Live[X]): X ! Of = perform[Live](asked)
 
   final case class Info(projects: List[String] = Nil, sessions: Vector[Session] = Vector.empty,
-    models: List[(String, String)] = Nil, policy: String = "", policyError: String = "",
+    models: List[(String, String)] = Nil, through: Map[String, String] = Map.empty, policy: String = "",
+    policyError: String = "",
     addresses: List[String] = Nil, pair: String = "", rozum: Boolean = false, claudeJailed: Boolean = false)
 
   final case class State(info: Info = Info(), place: String = "sessions", open: Option[String] = None,
@@ -122,6 +123,7 @@ object Page:
         J.arr(j, "projects").toList.collect { case Json.Str(p) => p },
         J.arr(j, "sessions").flatMap(Session.fromJson),
         J.arr(j, "models").toList.flatMap(m => for i <- J.str(m, "id"); l <- J.str(m, "label") yield i -> l),
+        J.arr(j, "models").toList.flatMap(m => for i <- J.str(m, "id"); t <- J.str(m, "through") yield i -> t).toMap,
         J.str(j, "policy").getOrElse(""), J.str(j, "policyError").getOrElse(""),
         J.arr(j, "addresses").toList.collect { case Json.Str(a) => a }, J.str(j, "pair").getOrElse(""),
         J.get(j, "jail").exists(J.bool(_, "rozum")), J.get(j, "jail").exists(J.bool(_, "claude"))))
@@ -214,6 +216,10 @@ object Page:
   def session(s: State, x: Session): (List[Part], List[Button[Msg]]) =
     val all = s.steps.getOrElse(x.id, Vector.empty)
     val decided = all.collect { case Step.Decided(id, v, why) => id -> (v, why) }.toMap
+    // an agent may tell a call twice (first empty, then with its input): one card, where it came first
+    val inputs = all.collect { case Step.Tool(id, _, in) => id -> in }.toMap
+    val firstAt = all.zipWithIndex.collect { case (Step.Tool(id, _, _), i) => id -> i }
+      .groupMapReduce(_._1)(_._2)(_ min _)
     val results = all.collect { case Step.Result(id, t, e) => id -> (t, e) }.toMap
     val buttons = List.newBuilder[Button[Msg]]
     def folded(key: String, text: String, limit: Int): List[Part] =
@@ -226,7 +232,9 @@ object Page:
       case (Step.You(t), _) => List(Part.block("you")(Part.text(t)))
       case (Step.Began(_, model), _) => List(Part.block("small")(Part.text(s"Claude Code · $model")))
       case (Step.Said(t), i) => List(Part.block("agent")(folded(s"said-$i", t, 1200)*))
-      case (Step.Tool(id, name, input), _) =>
+      case (Step.Tool(id, _, _), i) if firstAt.get(id).exists(_ != i) => Nil
+      case (Step.Tool(id, name, _), _) =>
+        val input = inputs.getOrElse(id, Json.Obj.empty)
         val waits = s.waitsFor(id).nonEmpty
         val (mark, word) = if waits then ("wait", "waiting for you") else decided.get(id) match
           case Some(("deny", why)) => ("block", s"denied${if why.nonEmpty then s": $why" else ""}")
@@ -249,7 +257,8 @@ object Page:
       case (Step.Result(_, _, _), _) => Nil
       case (Step.Decided(_, _, _), _) => Nil
       case (Step.Ended(ok, t, ms, cost, turns), i) =>
-        val line = s"${if ok then "Done" else "Not done"} · ${ms / 1000} s · $turns turns" +
+        val line = s"${if ok then "Done" else "Not done"} · ${ms / 1000} s" +
+          (if turns > 0 then s" · $turns turns" else "") +
           // a local model costs nothing: Claude Code's sum is by Claude's prices
           (if x.model.startsWith("local:") || cost <= 0 then "" else if cost >= 0.01 then f" · $$$cost%.2f"
           else f" · $$$cost%.3f")
@@ -284,8 +293,10 @@ object Page:
       "(~/.okay-remote/roots, a line each; ~/work if there is none).")), Nil)
     else
       val form = Form((Field.choice("Project", s.info.projects.map(p => short(p) -> p)*),
-        Field.choice("Model", s.info.models.map((i, l) => l -> i)*), Field.longText("Task")))
-      (List(Part.block("new")(form)), List(Button.submit("Start", form)((p, m, t) => Msg.Start(p, m, t): Msg)))
+        Field.choice("Agent", s.info.models.map((i, l) => l -> i)*), Field.longText("Task")))
+      val agents = s.info.models.map((i, l) => s"$l: ${s.info.through.getOrElse(i, "")}").mkString("\n")
+      (List(Part.block("new")(form), Part.block("small")(Part.text("Through the policy, by agent:\n" + agents))),
+        List(Button.submit("Start", form)((p, m, t) => Msg.Start(p, m, t): Msg)))
 
   def policy(s: State): (List[Part], List[Button[Msg]]) =
     val form = Form.one(Field.longText("The policy").initially(s.info.policy))

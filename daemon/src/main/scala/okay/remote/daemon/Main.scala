@@ -24,6 +24,9 @@ object OnJvm extends Machine:
   def home: String = JvmOs.userHome
   def read(file: String): Option[String] = JvmOs.read(file)
   def write(file: String, text: String): Unit = JvmOs.write(file, text, secret = true)
+  def save(file: String, text: String): Unit = JvmOs.write(file, text, secret = false)
+  def onPath(name: String): Boolean = sys.env.getOrElse("PATH", "").split(':').exists(d =>
+    java.nio.file.Files.isExecutable(java.nio.file.Paths.get(d, name)))
   def append(file: String, text: String): Unit = JvmOs.append(file, text)
   def remove(file: String): Unit = JvmOs.remove(file)
   def list(dir: String): List[String] = JvmOs.list(dir)
@@ -32,18 +35,28 @@ object OnJvm extends Machine:
   def log(text: String): Unit = JvmOs.err(text)
 
   private def onLoop(f: => Unit): Unit = JvmOs.loop.execute(() => f)
+  /** every process started here: stopped, with all they started, when the daemon stops — no agent outlives it */
+  private val started = java.util.concurrent.ConcurrentHashMap.newKeySet[Process]()
+  Runtime.getRuntime.addShutdownHook(new Thread(() => started.forEach { p =>
+    p.descendants().forEach(d => { val _ = d.destroy() }); p.destroy()
+  }))
   private def thread(name: String)(f: => Unit): Unit =
     val t = new Thread(() => f, name); t.setDaemon(true); t.start()
-  private def started(command: List[String], dir: String, env: Map[String, String]) = scala.util.Try {
+  private def start(command: List[String], dir: String, env: Map[String, String]) = scala.util.Try {
     val b = new ProcessBuilder(command.asJava).directory(new java.io.File(dir))
+    // an agent started here is not inside the session that may have started the daemon
+    List("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT").foreach(b.environment().remove)
     env.foreach((k, v) => b.environment().put(k, v))
-    b.redirectError(ProcessBuilder.Redirect.INHERIT).start()
+    val p = b.redirectError(ProcessBuilder.Redirect.INHERIT).start()
+    started.add(p)
+    p.onExit().thenRun(() => { val _ = started.remove(p) })
+    p
   }
 
   def spawn(command: List[String], dir: String, env: Map[String, String]): Agent =
     var onLine: String => Unit = _ => ()
     var onEnd: String => Unit = _ => ()
-    val p = started(command, dir, env)
+    val p = start(command, dir, env)
     p match
       case scala.util.Failure(e) => JvmOs.later(0)(onEnd(s"not started: ${e.getMessage}"))
       case scala.util.Success(proc) => thread("okay-remote-agent") {
@@ -67,7 +80,7 @@ object OnJvm extends Machine:
       }
 
   def run(command: List[String], dir: String, limit: Int)(done: (Int, String) => Unit): Unit =
-    started(command, dir, Map.empty) match
+    start(command, dir, Map.empty) match
       case scala.util.Failure(e) => JvmOs.later(0)(done(-1, s"not started: ${e.getMessage}"))
       case scala.util.Success(proc) => thread("okay-remote-run") {
           proc.getOutputStream.close()
@@ -79,9 +92,7 @@ object OnJvm extends Machine:
 
   /** what this machine has for the jail: rozum on the PATH, a token for Claude in `~/.okay-remote/claude-token` */
   def jail(base: String): Jail =
-    val rozum = sys.env.getOrElse("PATH", "").split(':').exists(d => java.nio.file.Files.isExecutable(
-      java.nio.file.Paths.get(d, "rozum")))
-    Jail(rozum, read(s"$base/claude-token").map(_.trim).filter(_.nonEmpty))
+    Jail(onPath("rozum"), read(s"$base/claude-token").map(_.trim).filter(_.nonEmpty))
 
 final class Daemon(args: List[String]):
   private def opt(name: String): Option[String] = args.dropWhile(_ != name).drop(1).headOption

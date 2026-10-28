@@ -77,6 +77,31 @@ phone (the page, from the relay) ──wss──▶ Relay (Cloudflare Worker + a
 4. **The record**: every step of every session kept, each line chained to the one before by SHA-256 (`h`), so a
    changed or removed line is found (`okay-remote verify`).
 
+## Any agent: ACP (2026-10-28)
+
+Besides Claude Code by its hook, a session may run any agent that speaks ACP (the Agent Client Protocol: JSON-RPC
+over the agent's stdin and stdout, `core/Acp`). The daemon is the client and says it reads and writes the files and
+runs the terminals; so `fs/write_text_file` (`Write`), `fs/read_text_file` (`Read`) and `terminal/create` (`Bash`)
+are done here, after the gate — the same policy, by Claude Code's tool names — and the commands run in rozum's jail
+where there is one. What the agent does itself it may ask first (`session/request_permission`): the gate answers
+by the call's kind (`execute` → `Bash`, `edit` → `Edit`, `fetch` → `WebFetch`, …), and what was allowed so is
+not asked again when it comes to be done. Each agent is started in the approval mode that asks (never its own
+auto-approval: a model judging). Its updates become the steps; `session/load` goes on with a session where the
+agent can.
+
+Tried end to end (`scripts/e2e/agents.js "<label>"`, a phone's screen, 2026-10-28):
+
+| agent | how | result |
+|---|---|---|
+| Claude Code (ACP) | `@zed-industries/claude-code-acp` | ✓ file through the client, command through the client's terminal, asked and approved |
+| Qwen Code | `qwen --acp --approval-mode default` (here on a local model through rozum) | ✓ file through the client; its shell asked through `request_permission`, approved |
+| Codex | `@zed-industries/codex-acp` 0.16.0 | ✗ the adapter does not know this Codex's models ("unknown variant `max`"): Internal error. Next: Codex's own `app-server` |
+| opencode | `opencode acp` | not logged in here: not tried |
+| Gemini CLI, Goose | `--experimental-acp`, `goose acp` | not installed here: not tried |
+
+Found on the way: with its own approval mode `auto`, Qwen Code ran a command itself, asking no one — so the approval
+mode is the daemon's to set, per agent. When the daemon stops, every process it started stops with it.
+
 ## Working with it
 
 - **Always allow**: on a card that waits, a rule made from the call (a command exactly; a file's directory; a tool),

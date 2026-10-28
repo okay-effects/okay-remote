@@ -61,7 +61,7 @@ class AcpSuite extends munit.FunSuite:
       "task" -> Json.Str("add a flag")))(answered = _)
     assert(answered.isRight, answered)
     val agent = m.procs.head
-    assertEquals(agent.command, List("qwen", "--acp"))
+    assertEquals(agent.command, List("qwen", "--acp", "--approval-mode", "default"))
     assertEquals(agent.dir, "/h/work/a")
     // the handshake: we say we read and write the files and run the terminals
     val init = agent.sent.head
@@ -105,7 +105,8 @@ class AcpSuite extends munit.FunSuite:
     // what the agent asks itself: refused on the phone, the reject option chosen
     agent.say(request(9, "session/request_permission", """{"sessionId":"s1","toolCall":{"toolCallId":"t9",""" +
       """"kind":"fetch","title":"Fetch","rawInput":{"url":"https://x"}},"options":[""" +
-      """{"optionId":"yes","name":"Allow","kind":"allow_once"},{"optionId":"no","name":"Reject","kind":"reject_once"}]}"""))
+      """{"optionId":"yes","name":"Allow","kind":"allow_once"},""" +
+      """{"optionId":"no","name":"Reject","kind":"reject_once"}]}"""))
     r.act(Json.obj("type" -> Json.Str("verdict"), "call" -> Json.Str("t9"), "approve" -> Json.Bool(false)))(_ => ())
     assertEquals(J.get(agent.sent.last, "result").flatMap(J.get(_, "outcome")).flatMap(J.str(_, "optionId")),
       Some("no"))

@@ -13,14 +13,16 @@ object Agents:
     AgentKind("claude-acp", "Claude Code (ACP)", List("npx", "-y", "@zed-industries/claude-code-acp"),
       List("claude", "npx"), acp),
     AgentKind("codex", "Codex", List("npx", "-y", "@zed-industries/codex-acp"), List("codex", "npx"), acp),
-    AgentKind("gemini", "Gemini CLI", List("gemini", "--experimental-acp"), List("gemini"), acp),
-    AgentKind("qwen", "Qwen Code", List("qwen", "--acp"), List("qwen"), acp),
+    // the approval mode that asks of every edit and command — never the agent's own auto-approval (a model judging)
+    AgentKind("gemini", "Gemini CLI", List("gemini", "--experimental-acp", "--approval-mode", "default"),
+      List("gemini"), acp),
+    AgentKind("qwen", "Qwen Code", List("qwen", "--acp", "--approval-mode", "default"), List("qwen"), acp),
     AgentKind("opencode", "opencode", List("opencode", "acp"), List("opencode"), acp),
     AgentKind("goose", "Goose", List("goose", "acp"), List("goose"), acp))
   def of(model: String): Option[AgentKind] = all.find(a => model == s"acp:${a.id}")
 
-/** a gate: a call of the agent — its card's id, the tool by the policy's name, its input — decided: `allow` or `deny`
- * (asked of a person in between, if the policy asks), and why */
+/** a gate: a call of the agent — its card's id, the tool by the policy's name, its input — decided: `allow` or
+ * `deny` (asked of a person in between, if the policy asks), and why */
 type Gate = (String, String, Json) => ((String, String) => Unit) => Unit
 
 /**
@@ -156,7 +158,11 @@ final class AcpSession(m: Machine, agent: Agent, kind: AgentKind, project: Strin
       .orElse(str(c, "path").map(p => s"[$p]")))
     if parts.nonEmpty then parts.mkString("\n") else get(u, "rawOutput") match
       case Some(Json.Str(s)) => s
-      case Some(o) => Json.print(o).take(4000)
+      // a list of parts, each with its text (Claude's adapter)
+      case Some(Json.Arr(items)) if items.exists(i => str(i, "text").nonEmpty) => items.flatMap(str(_, "text"))
+          .mkString("\n")
+      case Some(o) => List("stdout", "output", "text").flatMap(str(o, _)).headOption
+          .getOrElse(Json.print(o).take(4000))
       case None => ""
 
   /** the card a file or a command is matched to: the newest call whose input says it; or a card of its own */
