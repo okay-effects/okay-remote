@@ -1,6 +1,7 @@
 package okay.remote
 
 import okay.effects.json.{Descent, Json}
+import okay.guard.{Action, Decision, Entry, Gate, Judged, Judging, Ledger, Outcome, Verdict}
 import scala.collection.mutable
 
 /** THE MACHINE, AS THE REMOTE ASKS IT: its files, its time, a process in a directory. The JVM's in `daemon/`; a test's
@@ -28,6 +29,16 @@ trait Machine:
   /** a command run to its end: its exit code and its output (at most `limit` characters) */
   def run(command: List[String], dir: String, limit: Int = 400000)(done: (Int, String) => Unit): Unit
   def log(text: String): Unit
+
+/** THE AUDIT JOURNAL, as okay-guard keeps it (its `Ledger`'s records, chained): a record written; a policy's text kept
+ * once by its hash */
+trait Audit:
+  def record(r: Json): Unit
+  def policy(hash: String, text: String): Unit
+object Audit:
+  val none: Audit = new Audit:
+    def record(r: Json): Unit = ()
+    def policy(hash: String, text: String): Unit = ()
 
 /** an agent's process: a line to it, its lines, its end */
 trait Agent:
@@ -89,7 +100,8 @@ final case class Jail(rozum: Boolean = false, claudeToken: Option[String] = None
  * page told by `tell` (an event's name, its data).
  */
 final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
-                   judgeOf: String => Either[String, Judge], jail: () => Jail = () => Jail()):
+                   judgeOf: String => Either[String, Judge], jail: () => Jail = () => Jail(),
+                   audit: Audit = Audit.none):
   import J.*
   val base: String = s"${m.home}/.okay-remote"
   private def file(s: String) = s"$base/$s"
@@ -98,7 +110,7 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
   private final case class Live(agent: Agent, key: String, acp: Option[AcpSession] = None)
   private val live = mutable.Map.empty[String, Live]
   private final case class Wait(session: String, id: String, tool: String, input: Json, why: String,
-    answer: (String, String) => Unit)
+    answer: Verdict => Unit)
   private val waits = mutable.LinkedHashMap.empty[String, Wait]
   private var judge: Either[String, Judge] = Left("not read yet")
   val askFor: Int = 10 * 60 * 1000
@@ -111,6 +123,7 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
   def start(): Unit =
     judge = judgeOf(policy)
     judge.left.foreach(e => m.log(s"okay-remote: the policy does not compile, every call is refused: $e\n"))
+    keepPolicy()
     m.list(file("sessions")).filter(_.endsWith(".json")).flatMap(n => m.read(file(s"sessions/$n")))
       .flatMap(t => Descent.parse(t).toOption).flatMap(Session.fromJson).sortBy(_.updated)
       .foreach(s => sessions(s.id) = s.copy(running = false, busy = false, waiting = 0))
@@ -179,7 +192,8 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
         judgeOf(s("text")) match
           case Left(e) => Left(e)
           case Right(j) =>
-            m.write(file("policy.policy"), s("text")); judge = Right(j); tell("policy", Json.Str(s("text")))
+            m.write(file("policy.policy"), s("text")); judge = Right(j); keepPolicy()
+            tell("policy", Json.Str(s("text")))
             Right(Json.Obj.empty)
       case "forget" => sessions.get(s("session")).fold(Left("no such session")) { x =>
           live.remove(x.id).foreach(_.agent.kill())
@@ -192,9 +206,8 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
 
   private def verdict(call: String, approve: Boolean, why: String): Either[String, Json] =
     waits.remove(call).fold(Left("nothing waits for that")) { w =>
-      record(w.session, Step.Decided(w.id, if approve then "approved" else "refused", why))
-      w.answer(if approve then "allow" else "deny", if approve then "approved on the phone"
-        else if why.nonEmpty then s"refused: $why" else "refused by the person")
+      w.answer(if approve then Verdict.Approve(acting.get(call).fold(w.input)(_.arguments))
+        else Verdict.Refuse(if why.nonEmpty then why else "refused on the phone"))
       changed(w.session)
       Right(Json.Obj.empty)
     }
@@ -213,7 +226,7 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
                 if v != "allow" then answer(Left(s"a rule still ${if v == "deny" then "denies" else "asks for"} it" +
                   (if why.nonEmpty then s": $why" else "") + " — change the policy to allow it"))
                 else
-                  m.write(file("policy.policy"), text); judge = Right(j); tell("policy", Json.Str(text))
+                  m.write(file("policy.policy"), text); judge = Right(j); keepPolicy(); tell("policy", Json.Str(text))
                   answer(verdict(call, true, "always allowed").map(_ => Json.obj("policy" -> Json.Str(text))))
             }
 
@@ -267,6 +280,10 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
   /** a step of a session's agent: kept, told; its start names the agent's session (to go on with later) */
   private def stepped(id: String, st: Step): Unit =
     st match
+      case Step.Result(call, text, error) => acting.remove(call).foreach(a =>
+          judging.done(a, if error then Left(text.take(400)) else Right(Json.Str(text)), None))
+      case _ => ()
+    st match
       case Step.Began(a, _) if a.nonEmpty && sessions.get(id).exists(_.agent != a) =>
         sessions(id) = sessions(id).copy(agent = a); save(id)
       case Step.Ended(_, _, _, _, _) => sessions.get(id).foreach(x => sessions(id) = x.copy(busy = false))
@@ -277,7 +294,7 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
   private def ended(id: String, agent: Agent): Unit =
     agent.ended { why =>
       if live.get(id).exists(_.agent eq agent) then live.remove(id)
-      waits.filter(_._2.session == id).keys.toList.foreach(k => waits.remove(k).foreach(_.answer("deny", "ended")))
+      waits.filter(_._2.session == id).keys.toList.foreach(k => waits.remove(k).foreach(_.answer(Verdict.Refuse("the agent ended"))))
       if sessions.contains(id) then
         record(id, Step.Stopped(why))
         sessions(id) = sessions(id).copy(running = false, busy = false)
@@ -314,26 +331,76 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
         "permissionDecisionReason" -> Json.Str(if why.nonEmpty then why else s"okay-remote: $verdict"))))))
       gate(id, call, tool, input)(out)
 
-  /** THE GATE: a call decided by the policy — allowed or denied at once, or asked of a person (the phone) and
-   * answered when they answer, or refused when the time is up. Every decision a step of the session */
+  /** THE GATE (okay-guard's `Judging`): a call of the agent made an okay-guard `Action` — its tool the operation, the
+   * agent's kind the service, its input and `cwd` the arguments — and decided by okay-guard's own program: the policy,
+   * a person asked if it asks (the phone; refused when the time is up), each step a journal entry. The answer: `allow`,
+   * or `deny` and why; the action's record closed when its result comes (`stepped`) */
   def gate(id: String, call: String, tool: String, input: Json)(answer: (String, String) => Unit): Unit =
-    judge match
-      case Left(e) => record(id, Step.Decided(call, "deny", s"the policy does not compile: $e"))
-        answer("deny", s"the policy does not compile: $e")
-      case Right(j) => j.decide(call, tool, input, sessions.get(id).fold("")(_.project)) { (verdict, why) =>
-          record(id, Step.Decided(call, verdict, why))
-          if verdict != "ask" then answer(verdict, why)
-          else
-            val w = Wait(id, call, tool, input, why, answer)
-            waits(call) = w
-            tell("waiting", waitJson(w))
-            changed(id)
-            m.later(askFor)(waits.remove(call).foreach { w =>
-              record(id, Step.Decided(call, "timed out", ""))
-              w.answer("deny", "no one answered in time")
-              changed(id)
-            })
-        }
+    val project = sessions.get(id).fold("")(_.project)
+    val dir = if project.endsWith("/") then project else project + "/"
+    val args = input match
+      case o: Json.Obj => Json.Obj(o.fields.filterNot(_._1 == "cwd") :+ ("cwd" -> Json.Str(dir)))
+      case _ => Json.obj("cwd" -> Json.Str(dir))
+    val service = sessions.get(id).fold("")(x => Agents.of(x.model).fold("claude")(_.id))
+    val action = Action(Json.Str(call), tool, args, service, "agent",
+      Json.obj("session" -> Json.Str(id), "project" -> Json.Str(project)))
+    acting(call) = action
+    callers(call) = id
+    judging(action) {
+      case Outcome.Go(_) => answer("allow", "")
+      case Outcome.Stop(why) => acting.remove(call); answer("deny", why)
+      case Outcome.Pending(_, why) => acting.remove(call); answer("deny", why)
+    }
+
+  /** the actions that went, by call: closed in the journal when their result comes */
+  private val acting = mutable.Map.empty[String, Action]
+  /** whose session each call is */
+  private val callers = mutable.Map.empty[String, String]
+
+  /** what okay-guard's program asks of this place: the policy, the person (the phone), the clock, the journal */
+  private val place: Gate = new Gate:
+    def rules(call: okay.guard.Call): List[okay.guard.Rule] = Nil
+    def now: Long = m.now
+    override def decide(call: okay.guard.Call, answer: Judged => Unit): Unit = judge match
+      case Right(j) => j.guard.decide(call, answer)
+      case Left(e) => answer(Judged(Decision.Block(-1, s"the policy does not compile: $e")))
+    override def approved(call: okay.guard.Call): Unit = judge.foreach(_.guard.approved(call))
+    def ask(call: okay.guard.Call, reason: String, answer: Verdict => Unit): Unit =
+      val key = J.str(call.id, "").getOrElse(call.id match { case Json.Str(s) => s; case o => Json.print(o) })
+      val id = callers.getOrElse(key, "")
+      val input = call.arguments match
+        case o: Json.Obj => Json.Obj(o.fields.filterNot(_._1 == "cwd"))
+        case other => other
+      val w = Wait(id, key, call.operation, input, first(reason), answer)
+      waits(key) = w
+      tell("waiting", waitJson(w))
+      changed(id)
+      m.later(askFor)(waits.remove(key).foreach { w =>
+        w.answer(Verdict.TimedOut)
+        changed(id)
+      })
+    def recorded(e: Entry): Unit =
+      ledger(e)
+      val key = e.id.collect { case Json.Str(s) => s }.getOrElse("")
+      callers.get(key).foreach { id =>
+        (e.kind, e.method) match
+          case (Entry.Kind.Decided, v @ ("pass" | "block" | "ask")) =>
+            val word = v match { case "pass" => "allow"; case "block" => "deny"; case _ => "ask" }
+            record(id, Step.Decided(key, word, if word == "allow" then "" else first(e.note)))
+          case (Entry.Kind.Verdict, v) => record(id, Step.Decided(key, v, first(e.note)))
+          case _ => ()
+      }
+  private val judging = new Judging(place)(okay.effects.machine.Machine)
+  /** a rule's word, without the rules that did not apply */
+  private def first(why: String): String =
+    why.split("; ").headOption.getOrElse(why).replaceFirst("^rule \\d+: ", "")
+
+  // ---- THE JOURNAL (okay-guard's): one record an action, with its decision's proof and the policy it was made by
+  private def policyHash: String = "sha256:" + okay.guard.Sha256.hex(policy)
+  private def keepPolicy(): Unit = audit.policy(policyHash, policy)
+  private val ledger = new Ledger(call => okay.guard.Context(
+    call.context match { case o: Json.Obj => o.get("session").collect { case Json.Str(s) => s }.getOrElse("");
+      case _ => "" }, call.service, None, Json.obj("hash" -> Json.Str(policyHash))), audit.record)
 
   /** each session's record checked: its chain unbroken, or where it breaks */
   def verify: List[(String, Either[String, Int])] = sessions.keys.toList.sorted.map { id =>

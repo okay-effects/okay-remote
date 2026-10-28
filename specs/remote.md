@@ -67,15 +67,21 @@ phone (the page, from the relay) ──wss──▶ Relay (Cloudflare Worker + a
 
 ## Safety, in layers
 
-1. **The policy decides every tool call** (the hook; fail closed). It is the boundary for every model.
+1. **The policy decides every tool call** (the hook; fail closed). It is the boundary for every model. The decision
+   is okay-guard's own program (`Judging`, specs/services.md there): each call an okay-guard `Action` (the tool its
+   operation, the agent's kind its service, its input and `cwd` its arguments), decided by the policy, a person asked
+   through okay-guard's `Human` (the phone), the policy told of an approval (its state changes then), each step a
+   journal entry.
 2. **The sandbox** (rozum's Seatbelt jail, macOS): writes only in the project and the toolchains' caches, secrets
    unreadable, network loopback only. Local models always run in it. Claude runs in it when rozum is there and
    `~/.okay-remote/claude-token` holds a token from `claude setup-token` (the jail keeps the keychain closed, so
    Claude's own login cannot be read in it); network then full (Claude's API), writes still confined.
 3. **The way in**: 127.0.0.1 and a token (Host and Origin checked, constant-time compare); or the relay, end to end
    encrypted, the room's auth checked by the relay, the frames by the daemon.
-4. **The record**: every step of every session kept, each line chained to the one before by SHA-256 (`h`), so a
-   changed or removed line is found (`okay-remote verify`).
+4. **The record**: okay-guard's audit journal, `~/.okay-remote/journal/<day>.jsonl` — one record an action: what the
+   agent asked, the decision with its proof, the person's verdict, the result — chained by SHA-256, each policy kept
+   by its hash; and every step of every session, chained too. `okay-remote verify` checks both; okay-guard's own
+   `okay-guard journal --home ~/.okay-remote [--verify|--csv]` reads the journal.
 
 ## Any agent: ACP (2026-10-28)
 

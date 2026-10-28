@@ -84,8 +84,10 @@ with no cloud and no key. With rozum installed, the commands of the other agents
    (AES-256-GCM) with a key from the QR code, which never leaves your devices: the relay keeps nothing and cannot read
    what it passes; old, replayed or reflected messages are dropped. Lost your phone, or showed the code to someone?
    `okay-remote --relay --pair-again` shuts every paired phone out.
-4. **The record**: every step of every session is kept in `~/.okay-remote/sessions/`, each line chained to the one
-   before by SHA-256: `okay-remote verify` finds a line changed or removed.
+4. **The record**: an audit journal in okay-guard's format, `~/.okay-remote/journal/` — every action of every agent:
+   what it asked, what the policy decided and why (with the proof), what you answered, what came of it — and every
+   step of every session in `~/.okay-remote/sessions/`, both chained by SHA-256: `okay-remote verify` finds a line
+   changed or removed.
 
 ## When something is wrong
 

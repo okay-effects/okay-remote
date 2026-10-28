@@ -1,6 +1,6 @@
 package okay.remote
 
-import okay.effects.json.{Descent, Json}
+import okay.effects.json.Json
 import scala.collection.mutable
 import scala.concurrent.ExecutionContext
 
@@ -51,10 +51,17 @@ class RemoteSuite extends munit.FunSuite:
     def log(t: String) = ()
     def real(p: String) = p
 
+  val records = mutable.Buffer.empty[Json]
+  val policies = mutable.Map.empty[String, String]
+  val audit: Audit = new Audit:
+    def record(r: Json): Unit = records += r
+    def policy(hash: String, text: String): Unit = policies(hash) = text
+
   def made(jail: Jail = Jail()): (Fake, Remote, mutable.Buffer[(String, Json)]) =
     val m = Fake()
     val told = mutable.Buffer.empty[(String, Json)]
-    val r = Remote(m, () => 7788, (e, j) => told += e -> j, Judge(_), () => jail)
+    records.clear()
+    val r = Remote(m, () => 7788, (e, j) => told += e -> j, Judge(_), () => jail, audit)
     r.start()
     (m, r, told)
 
@@ -129,7 +136,7 @@ class RemoteSuite extends munit.FunSuite:
     r.hook(id, key, Json.obj("tool_use_id" -> Json.Str("t"), "tool_name" -> Json.Str("WebFetch"),
       "tool_input" -> Json.obj("url" -> Json.Str("https://x"))))(o => out += o.toString)
     m.timers.foreach(_())
-    assert(out.head.contains("deny") && out.head.contains("in time"))
+    assert(out.head.contains("deny") && out.head.contains("not done"), out)
   }
 
   test("a policy that does not compile is not taken") {
@@ -201,3 +208,25 @@ class RemoteSuite extends munit.FunSuite:
     started(r2, m2)
     assertEquals(m2.spawned.head._1.head, "claude")
   }
+
+  test("the journal is okay-guard's: each call a record — its decision with the proof, the person, the result") {
+    val (m, r, _) = made()
+    val (id, key) = started(r, m)
+    asked(r, id, key, "t1", "Bash", "command" -> "sudo ls")
+    asked(r, id, key, "t2", "Bash", "command" -> "python3 x.py")
+    r.act1(Json.obj("type" -> Json.Str("verdict"), "call" -> Json.Str("t2"), "approve" -> Json.Bool(true)))
+    m.onLine("""{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"42"}]}}""")
+    def at(j: Json, path: String*) = okay.guard.Paths.at(j, path.toList).getOrElse(Json.Null)
+    assertEquals(records.map(r => (at(r, "action", "operation"), at(r, "decision"), at(r, "outcome", "status"))).toList,
+      List((Json.Str("Bash"), Json.Str("block"), Json.Str("not done")),
+        (Json.Str("Bash"), Json.Str("ask"), Json.Str("ok"))))
+    assertEquals(at(records.last, "person", "verdict"), Json.Str("approved"))
+    assertEquals(at(records.last, "outcome", "result"), Json.Str("42"))
+    assertEquals(at(records.last, "action", "service"), Json.Str("claude"))
+    assertEquals(at(records.last, "agent"), Json.Str(id))
+    // the policy each record was decided by, kept by its hash
+    val hash = at(records.last, "policy", "hash")
+    assert(hash.isInstanceOf[Json.Str] && policies.contains(hash.asInstanceOf[Json.Str].s))
+    assert(at(records.head, "why", "certificate") != Json.Null || at(records.head, "why") != Json.Null)
+  }
+

@@ -3,7 +3,8 @@ package okay.remote.daemon
 import okay.effects.json.{Descent, Json}
 import okay.guard.jvm.JvmOs
 import okay.guard.local.{Stream, Web, WebRequest}
-import okay.remote.{Agent, J, Jail, Judge, Machine, Remote, Secret}
+import okay.guard.local.JournalFiles
+import okay.remote.{Agent, Audit, J, Jail, Judge, Machine, Remote, Secret}
 import java.nio.charset.StandardCharsets.UTF_8
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
@@ -133,7 +134,7 @@ final class Daemon(args: List[String]):
     val text = s"event: $event\ndata: ${Json.print(data)}\n\n"
     pages.toList.foreach(_.write(text))
     relay.foreach(_.send("event", "name" -> Json.Str(event), "data" -> data))
-  private val remote = Remote(OnJvm, () => port, tell, Judge(_), () => jail)
+  private val remote = Remote(OnJvm, () => port, tell, Judge(_), () => jail, Daemon.audit(OnJvm.home))
   private var jail = Jail()
   private val token: String = OnJvm.read(s"${remote.base}/token").map(_.trim).filter(_.length >= 32).getOrElse {
     val t = OnJvm.randomHex(24); OnJvm.write(s"${remote.base}/token", t); t
@@ -292,17 +293,28 @@ object Daemon:
           .filter(_.matches("[A-Za-z0-9_]{5,64}")).foreach(name => JvmOs.loop.execute(() => got(name)))
       }
 
-  /** `okay-remote verify`: every session's record checked, its chain unbroken or where it breaks */
+  /** okay-guard's audit journal of this daemon: `~/.okay-remote/journal/<day>.jsonl`, chained, the policies by hash */
+  def journal(home: String): JournalFiles = new JournalFiles(JvmOs, s"$home/.okay-remote")
+  def audit(home: String): Audit =
+    val files = journal(home)
+    new Audit:
+      def record(r: Json): Unit =
+        files.append(r, J.long(r, "ended").max(J.long(r, "at")).max(0L) match { case 0L => JvmOs.now; case t => t })
+      def policy(hash: String, text: String): Unit = files.keepPolicy(hash, text)
+
+  /** `okay-remote verify`: okay-guard's journal (every action, chained), and every session's record */
   def verify(): Unit =
     given scala.concurrent.ExecutionContext = JvmOs.ec
     val r = Remote(OnJvm, () => 0, (_, _) => (), Judge(_))
     r.start()
+    val journal = Daemon.journal(OnJvm.home).verify
+    JvmOs.out(journal.fold(e => s"the journal: BROKEN — $e\n", ok => s"the journal: $ok\n"))
     val checked = r.verify
     checked.foreach {
       case (id, Right(n)) => JvmOs.out(s"$id: $n records, the chain unbroken\n")
       case (id, Left(e)) => JvmOs.out(s"$id: BROKEN — $e\n")
     }
-    JvmOs.exit(if checked.forall(_._2.isRight) then 0 else 1)
+    JvmOs.exit(if journal.isRight && checked.forall(_._2.isRight) then 0 else 1)
 
 /** THE PAGE'S FILES: its html, manifest, worker, icon (site/), its modules (web/, linked) — in the jar */
 object Page:

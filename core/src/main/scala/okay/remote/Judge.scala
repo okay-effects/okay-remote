@@ -8,7 +8,7 @@ import scala.concurrent.ExecutionContext
 /** THE POLICY OVER AN AGENT'S TOOL CALLS (okay-guard's language): each call of Claude Code's tools an action — the
  * tool its operation, its input and `cwd` (the project's directory) its arguments — decided `allow`, `ask` or `deny`,
  * and why. A policy that does not compile is not made: fail closed is the caller's (`Judge.closed`) */
-final class Judge private (guard: PolicyGuard):
+final class Judge private (val guard: PolicyGuard):
   def decide(id: String, tool: String, input: Json, cwd: String)(answer: (String, String) => Unit): Unit =
     // the project's directory with its `/`: `/w/p` must not take in `/w/p2`
     val dir = if cwd.endsWith("/") then cwd else cwd + "/"
