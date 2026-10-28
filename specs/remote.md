@@ -18,9 +18,11 @@ phone (PWA) ──HTTP+SSE──▶ the daemon (JVM) ──spawns──▶ claud
                                └── PreToolUse hook ◀─────┘  every tool call, decided by the policy
 ```
 
-- **The daemon** (`daemon/`, `okay-remote.jar`): the projects, the sessions, the policy, the page. Over okay-guard's
-  `Os` (`JvmOs`): its processes, its web server, its files. Binds 127.0.0.1; `--lan` binds every address so a phone
-  on the same network (or Tailscale) reaches it. A token on every request; the page keeps it.
+- **The daemon** (`daemon/`, `okay-remote.jar`): the projects, the sessions, the policy, the page. The remote's logic is
+  programs over its effects (`core/World`: `Files`, `Processes`, `Pages`, okay-scala's `Clock`, `Random`, `Log`,
+  `Async`), run on the JVM by ports over okay-guard's `JvmOs` (`OnJvm`), in tests by `MemoryWorld`. Binds 127.0.0.1;
+  `--lan` binds every address so a phone on the same network (or Tailscale) reaches it. A token on every request; the
+  page keeps it.
 - **A session**: one `claude -p --input-format stream-json --output-format stream-json --verbose` process in the
   project's directory, kept while the session is open: a follow-up is one more line to it. Its lines become **steps**
   (`core/Steps`): what the agent says, each tool call, its result, the end of a turn (time, cost). Steps are kept in
@@ -52,12 +54,12 @@ phone (the page, from the relay) ──wss──▶ Relay (Cloudflare Worker + a
 - **Pairing**: the daemon makes a secret S (32 random bytes, `~/.okay-remote/relay.json`, 0600). Its local page
   (127.0.0.1 only) shows a QR code of `<relay>/#s=<S>`: the fragment never leaves the phone. The page keeps S in the
   browser. `--pair-again` makes a new S: every paired phone is out.
-- **Derived** (okay-serverless's sealed rooms, `okay-serverless-relay`, its `Pairing` under the label
-  `okay-remote`): `enc = SHA-256("okay-remote/enc:" ‖ S)` the AES key; `auth = hex SHA-256("okay-remote/auth:" ‖ S)`;
-  `room = hex SHA-256(auth)`. The daemon dials `/r/<room>/host`, a phone `/r/<room>/guest`, each `?auth=<auth>`; the
-  room (okay-serverless's `Rooms`) lets in only an `auth` whose SHA-256 is its name. The relay never has `enc`: it passes frames it
-  cannot read, keeps nothing (no storage; the sockets' roles in their attachments), one daemon per room (the newest),
-  any number of phones, frames at most 2 MB.
+- **Derived** (okay-serverless's sealed rooms, `okay-serverless-relay`, its `Pairing` under the label `okay-remote`):
+  `enc = SHA-256("okay-remote/enc:" ‖ S)` the AES key; `auth = hex SHA-256("okay-remote/auth:" ‖ S)`; `room = hex
+  SHA-256(auth)`. The daemon dials `/r/<room>/host`, a phone `/r/<room>/guest`, each `?auth=<auth>`; the room
+  (okay-serverless's `Rooms`) lets in only an `auth` whose SHA-256 is its name. The relay never has `enc`: it passes
+  frames it cannot read, keeps nothing (no storage; the sockets' roles in their attachments), one daemon per room (the
+  newest), any number of phones, frames at most 2 MB.
 - **A frame**: `base64url(iv ‖ AES-GCM(enc, iv, json, aad "okay-remote/1"))`; the JSON says who sent it (`from`),
   when (`t`, ms) and a nonce (`n`). A frame from the wrong side, older than 5 minutes, or seen before, is dropped —
   no reflection, no replay. Kinds: phone → `hello`, `act {id, body}`; daemon → `answer {id, ok, body}`, `event
@@ -86,16 +88,15 @@ phone (the page, from the relay) ──wss──▶ Relay (Cloudflare Worker + a
 
 ## Any agent: ACP (2026-10-28)
 
-Besides Claude Code by its hook, a session may run any agent that speaks ACP (the Agent Client Protocol: JSON-RPC
-over the agent's stdin and stdout) — by okay-guard's ACP adapter (`okay-guard-acp`, its `AcpClient`; okay-remote
-gives it a `Host` and turns its `Event`s into steps). The daemon is the client and says it reads and writes the files and
-runs the terminals; so `fs/write_text_file` (`Write`), `fs/read_text_file` (`Read`) and `terminal/create` (`Bash`)
-are done here, after the gate — the same policy, by Claude Code's tool names — and the commands run in rozum's jail
-where there is one. What the agent does itself it may ask first (`session/request_permission`): the gate answers
-by the call's kind (`execute` → `Bash`, `edit` → `Edit`, `fetch` → `WebFetch`, …), and what was allowed so is
-not asked again when it comes to be done. Each agent is started in the approval mode that asks (never its own
-auto-approval: a model judging). Its updates become the steps; `session/load` goes on with a session where the
-agent can.
+Besides Claude Code by its hook, a session may run any agent that speaks ACP (the Agent Client Protocol: JSON-RPC over
+the agent's stdin and stdout) — by okay-guard's ACP adapter (`okay-guard-acp`, its `AcpClient`; okay-remote gives it a
+`Host` and turns its `Event`s into steps). The daemon is the client and says it reads and writes the files and runs the
+terminals; so `fs/write_text_file` (`Write`), `fs/read_text_file` (`Read`) and `terminal/create` (`Bash`) are done here,
+after the gate — the same policy, by Claude Code's tool names — and the commands run in rozum's jail where there is one.
+What the agent does itself it may ask first (`session/request_permission`): the gate answers by the call's kind
+(`execute` → `Bash`, `edit` → `Edit`, `fetch` → `WebFetch`, …), and what was allowed so is not asked again when it comes
+to be done. Each agent is started in the approval mode that asks (never its own auto-approval: a model judging). Its
+updates become the steps; `session/load` goes on with a session where the agent can.
 
 Tried end to end (`scripts/e2e/agents.js "<label>"`, a phone's screen, 2026-10-28):
 

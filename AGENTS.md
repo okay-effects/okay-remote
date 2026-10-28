@@ -7,11 +7,12 @@ Read before anything else; then `specs/remote.md`. A change of design is a chang
   (republished as 0.1.0 while nobody else uses it; then clear the Coursier cache's copy). A gap in okay-guard or
   okay-ui is fixed there, never worked around here.
 - What is a library's is there: the decision (okay-guard's `Judging`), the journal (okay-guard's `Ledger`), any
-  agent (okay-guard-acp). okay-remote keeps its own: the sessions, the steps, the page, the relay (to move to
-  okay-serverless next).
-- The logic is `core/Remote` over a `Machine` (the JVM's in `daemon/`, a test's in memory): no JDK I/O outside
-  `daemon/`, no DOM outside okay-ui's `Dom.run`. The page is an okay-ui program (`web/Page`), its world the effect
-  `Live`.
+  agent (okay-guard-acp), the sealed rooms and the bot (okay-serverless's `relay`, `telegram`). okay-remote keeps its
+  own: the sessions, the steps, the page, the relay's steward.
+- The logic is `core/Remote`: programs over its `World` — `Files`, `Processes`, `Pages` and okay-scala's `Clock`,
+  `Random`, `Log`, `Async` — run in a place by `World.run(ports)` (the JVM's ports in `daemon/` `OnJvm`, a test's
+  `MemoryWorld`). No JDK I/O outside `daemon/`, no DOM outside okay-ui's `Dom.run`. The page is an okay-ui program
+  (`web/Page`), its world the effect `Live`.
 - Every tool call goes through the hook; the daemon unreachable, the call is refused (exit 2). Never a mode that
   skips it.
 - The relay (`relay/`, a Cloudflare Worker) KEEPS NOTHING and READS NOTHING: no storage, frames sealed end to end;

@@ -12,7 +12,8 @@ import scala.scalajs.js.annotation.JSExportTopLevel
 
 /**
  * OKAY-REMOTE'S RELAY (specs/remote.md): an okay-serverless app. It gives the page (the same page as the daemon's),
- * joins a daemon and its phones in okay-serverless's sealed `Rooms` — frames it cannot read, nothing kept — and is a
+ * joins a daemon and its phones in okay-serverless's sealed `Rooms` — frames it cannot read, nothing kept — and is
+ * a
  * Telegram bot that tells a linked chat when something waits (only that, never what). Nothing here names Cloudflare
  * but the last line.
  */

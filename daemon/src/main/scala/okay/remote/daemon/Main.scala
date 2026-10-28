@@ -4,7 +4,10 @@ import okay.effects.json.{Descent, Json}
 import okay.guard.jvm.JvmOs
 import okay.guard.local.{Stream, Web, WebRequest}
 import okay.guard.local.JournalFiles
-import okay.remote.{Agent, Audit, J, Jail, Judge, Machine, Remote, Secret}
+import okay.remote.{Agent, Audit, Files, J, Judge, Pages, Port, Processes, Remote, Secret, World}
+import okay.scala3.{flatMap, map}
+import okay.scala3.std.{Clock, Log, Random}
+import scala.concurrent.{Future, Promise}
 import okay.serverless.relay.{Pairing, RelayClient, Sealer}
 import java.nio.charset.StandardCharsets.UTF_8
 import scala.collection.mutable
@@ -38,24 +41,52 @@ object Main:
       if args.headOption.contains("verify") then Daemon.verify()
       else new Daemon(args.toList).start())
 
-/** the JVM as the remote's machine: okay-guard's `JvmOs` (its loop, its files), and processes started here in a
- * directory with an environment — their output read on threads of their own, handed to the loop */
-object OnJvm extends Machine:
-  def now: Long = JvmOs.now
-  def later(ms: Int)(f: => Unit): Unit = JvmOs.later(ms)(f)
-  def randomHex(bytes: Int): String = JvmOs.randomHex(bytes)
-  def home: String = JvmOs.userHome
-  def read(file: String): Option[String] = JvmOs.read(file)
-  def write(file: String, text: String): Unit = JvmOs.write(file, text, secret = true)
-  def save(file: String, text: String): Unit = JvmOs.write(file, text, secret = false)
+/** THE JVM AS THE REMOTE'S PLACE: okay-guard's `JvmOs` (its loop, its files), processes started here in a directory
+ * with an environment — their output read on threads of their own, handed to the loop — as the ports of the
+ * remote's
+ * `World` (`ports`) */
+object OnJvm:
   def onPath(name: String): Boolean = sys.env.getOrElse("PATH", "").split(':').exists(d =>
     java.nio.file.Files.isExecutable(java.nio.file.Paths.get(d, name)))
-  def append(file: String, text: String): Unit = JvmOs.append(file, text)
-  def remove(file: String): Unit = JvmOs.remove(file)
-  def list(dir: String): List[String] = JvmOs.list(dir)
-  def real(path: String): String =
-    scala.util.Try(java.nio.file.Paths.get(path).toRealPath().toString).getOrElse(path)
-  def log(text: String): Unit = JvmOs.err(text)
+  private val random = new java.security.SecureRandom
+  private def now[X](x: => X): Future[X] = Future.fromTry(scala.util.Try(x))
+
+  /** the remote's world on the JVM: each effect by its port; the pages told by `tell` */
+  def ports(tell: (String, Json) => Unit): World.Ports = World.Ports(
+    files = new Port[Files]:
+      def apply[X](op: Files[X]): Future[X] = now[X](op match
+        case Files.Home() => JvmOs.userHome
+        case Files.Read(p) => JvmOs.read(p)
+        case Files.Write(p, t, own) => JvmOs.write(p, t, secret = own)
+        case Files.Append(p, t) => JvmOs.append(p, t)
+        case Files.Remove(p) => JvmOs.remove(p)
+        case Files.Entries(d) => JvmOs.list(d)
+        case Files.Real(p) => scala.util.Try(java.nio.file.Paths.get(p).toRealPath().toString).getOrElse(p)),
+    processes = new Port[Processes]:
+      def apply[X](op: Processes[X]): Future[X] = op match
+        case Processes.Spawn(c, d, e) => now(spawn(c, d, e))
+        case Processes.Run(c, d, limit) =>
+          val done = Promise[(Int, String)]()
+          run(c, d, limit)((code, out) => { val _ = done.trySuccess((code, out)) })
+          done.future
+        case Processes.OnPath(n) => now(onPath(n)),
+    pages = new Port[Pages]:
+      def apply[X](op: Pages[X]): Future[X] = now[X](op match
+        case Pages.Tell(e, d) => tell(e, d)),
+    clock = new Port[Clock]:
+      def apply[X](op: Clock[X]): Future[X] = op match
+        case Clock.Now() => now(JvmOs.now)
+        case Clock.Sleep(ms) =>
+          val done = Promise[Unit]()
+          JvmOs.later(ms.toInt)(done.trySuccess(()))
+          done.future,
+    random = new Port[Random]:
+      def apply[X](op: Random[X]): Future[X] = now[X](op match
+        case Random.NextLong() => random.nextLong()),
+    log = new Port[Log]:
+      def apply[X](op: Log[X]): Future[X] = now[X](op match
+        case Log.Entry(_, m) => JvmOs.err(m + "\n")),
+    ec = JvmOs.ec, time = () => JvmOs.now)
 
   private def onLoop(f: => Unit): Unit = JvmOs.loop.execute(() => f)
   /** every process started here: stopped, with all they started, when the daemon stops — no agent outlives it */
@@ -76,7 +107,7 @@ object OnJvm extends Machine:
     p
   }
 
-  def spawn(command: List[String], dir: String, env: Map[String, String]): Agent =
+  private def spawn(command: List[String], dir: String, env: Map[String, String]): Agent =
     var onLine: String => Unit = _ => ()
     var onEnd: String => Unit = _ => ()
     val p = start(command, dir, env)
@@ -102,7 +133,7 @@ object OnJvm extends Machine:
         proc.descendants().forEach(d => { val _ = d.destroy() }); proc.destroy()
       }
 
-  def run(command: List[String], dir: String, limit: Int)(done: (Int, String) => Unit): Unit =
+  private def run(command: List[String], dir: String, limit: Int)(done: (Int, String) => Unit): Unit =
     start(command, dir, Map.empty) match
       case scala.util.Failure(e) => JvmOs.later(0)(done(-1, s"not started: ${e.getMessage}"))
       case scala.util.Success(proc) => thread("okay-remote-run") {
@@ -112,10 +143,6 @@ object OnJvm extends Machine:
           val code = proc.waitFor()
           onLoop(done(code, out))
         }
-
-  /** what this machine has for the jail: rozum on the PATH, a token for Claude in `~/.okay-remote/claude-token` */
-  def jail(base: String): Jail =
-    Jail(onPath("rozum"), read(s"$base/claude-token").map(_.trim).filter(_.nonEmpty))
 
 final class Daemon(args: List[String]):
   private def opt(name: String): Option[String] = args.dropWhile(_ != name).drop(1).headOption
@@ -135,15 +162,15 @@ final class Daemon(args: List[String]):
     val text = s"event: $event\ndata: ${Json.print(data)}\n\n"
     pages.toList.foreach(_.write(text))
     relay.foreach(_.send("event", "name" -> Json.Str(event), "data" -> data))
-  private val remote = Remote(OnJvm, () => port, tell, Judge(_), () => jail, Daemon.audit(OnJvm.home))
-  private var jail = Jail()
-  private val token: String = OnJvm.read(s"${remote.base}/token").map(_.trim).filter(_.length >= 32).getOrElse {
-    val t = OnJvm.randomHex(24); OnJvm.write(s"${remote.base}/token", t); t
+  private val base = s"${JvmOs.userHome}/.okay-remote"
+  private val remote = Remote(OnJvm.ports(tell), () => port, Judge(_), Daemon.audit(JvmOs.userHome))
+  private val token: String = JvmOs.read(s"$base/token").map(_.trim).filter(_.length >= 32).getOrElse {
+    val t = JvmOs.randomHex(24); JvmOs.write(s"$base/token", t, secret = true); t
   }
 
   // ---- THE RELAY (specs/remote.md): on with `--relay [url]`, remembered; `--pair-again` a new secret
-  private val relayFile = s"${remote.base}/relay.json"
-  private val kept = OnJvm.read(relayFile).flatMap(t => okay.effects.json.Descent.parse(t).toOption)
+  private val relayFile = s"$base/relay.json"
+  private val kept = JvmOs.read(relayFile).flatMap(t => okay.effects.json.Descent.parse(t).toOption)
   private val relayUrl: String = args.dropWhile(_ != "--relay").drop(1).headOption.filterNot(_.startsWith("--"))
     .orElse(kept.flatMap(J.str(_, "url"))).getOrElse(Daemon.hosted)
   private val relayOn: Boolean = !args.contains("--no-relay") && (args.contains("--relay") ||
@@ -158,7 +185,8 @@ final class Daemon(args: List[String]):
   private var chat: Option[(String, String)] =
     for k <- kept; c <- J.str(k, "chat"); s <- J.str(k, "sig") if c.nonEmpty yield (c, s)
   private def keepRelay(): Unit =
-    OnJvm.write(relayFile, Json.print(Json.Obj(Vector("on" -> Json.Bool(relayOn), "url" -> Json.Str(relayUrl),
+    JvmOs.write(relayFile, secret = true, text = Json.print(Json.Obj(Vector("on" -> Json.Bool(relayOn),
+      "url" -> Json.Str(relayUrl),
       "secret" -> Json.Str(keys.text)) ++ chat.toVector.flatMap((c, s) => Vector("chat" -> Json.Str(c),
       "sig" -> Json.Str(s))))))
   /** the linking code the relay gave (one at a time, ten minutes), and the act that waits for it */
@@ -167,13 +195,13 @@ final class Daemon(args: List[String]):
   private def fromRelay(line: String): Unit =
     line.split(' ').toList match
       case List("code", c) =>
-        code = Some((c, OnJvm.now))
+        code = Some((c, JvmOs.now))
         linking.foreach(_(Right(Json.obj("url" -> Json.Str(s"https://t.me/$bot?start=$c")))))
         linking = None
       // a chat bound by the relay: taken once, by the code this daemon asked for — then the relay dialled again
       // with it (the room learns the chat from the request), and the chat told
       case List("bound", c, s, k) =>
-        if code.exists((x, at) => x == k && OnJvm.now - at < 600000) then
+        if code.exists((x, at) => x == k && JvmOs.now - at < 600000) then
           code = None; chat = Some((c, s)); keepRelay(); tell("telegram", telegram)
           JvmOs.err("okay-remote: Telegram linked\n")
           relay.foreach { r => r.plain(s"linked $c $s"); r.redial() }
@@ -184,7 +212,7 @@ final class Daemon(args: List[String]):
   /** the last time each session was told of, by kind: one message a minute at most */
   private val toldAt = mutable.Map.empty[(String, String), Long]
   private def notify(session: String, kind: String): Unit = if chat.nonEmpty then
-    val now = OnJvm.now
+    val now = JvmOs.now
     if toldAt.get((session, kind)).forall(now - _ > 60000) then
       toldAt((session, kind)) = now
       val project = remote.about(session).map(_._1.split('/').last).getOrElse("a project")
@@ -207,7 +235,7 @@ final class Daemon(args: List[String]):
     case _ => remote.act(body)(answer)
 
   private def phones(kind: String, j: Json): Unit = kind match
-    case "hello" => relay.foreach(_.send("event", "name" -> Json.Str("hello"), "data" -> hello(false)))
+    case "hello" => hello(false)(j => relay.foreach(_.send("event", "name" -> Json.Str("hello"), "data" -> j)))
     case "act" =>
       val id = J.get(j, "id").getOrElse(Json.Null)
       act(J.get(j, "body").getOrElse(Json.Null)) { r =>
@@ -216,11 +244,11 @@ final class Daemon(args: List[String]):
       }
     case _ => ()
 
-  def start(): Unit =
-    jail = OnJvm.jail(remote.base)
+  def start(): Unit = remote.start(() => started())
+  private def started(): Unit =
+    val jail = remote.jail
     if args.contains("--pair-again") then chat = None
     keepRelay()
-    remote.start()
     if relayOn then
       val r = RelayClient(relayUrl, keys, run => JvmOs.loop.execute(run), phones, fromRelay,
         said = s => JvmOs.err(s"okay-remote: $s\n"), query = () => chat.fold("")((c, s) => s"chat=$c&sig=$s"))
@@ -235,18 +263,20 @@ final class Daemon(args: List[String]):
       JvmOs.err(s"okay-remote: open $here\n")
       if lan then JvmOs.lanAddresses.foreach(a =>
         JvmOs.err(s"  on your phone (same network): http://$a:$p/?t=$token\n"))
-      JvmOs.err(s"  projects under ${remote.roots.mkString(", ")} (${remote.projects.size}); " +
-        s"the policy: ${remote.base}/policy.policy\n")
+      remote.go(remote.roots.flatMap(rs => remote.projects.map(ps => (rs, ps.size)))) { (rs, n) =>
+        JvmOs.err(s"  projects under ${rs.mkString(", ")} ($n); the policy: $base/policy.policy\n")
+      }
     }
 
   /** what a page is told first: the remote's snapshot, and where a phone reaches this daemon (`--lan`) */
-  private def hello(local: Boolean): Json = remote.snapshot match
-    case o: Json.Obj => Json.Obj(o.fields ++ Vector(
+  private def hello(local: Boolean)(done: Json => Unit): Unit = remote.go(remote.snapshot) {
+    case o: Json.Obj => done(Json.Obj(o.fields ++ Vector(
         "addresses" -> Json.Arr((if lan then JvmOs.lanAddresses else Nil).map(Json.Str(_)).toVector),
         // the pairing's link (its secret in the fragment) only to a page on this very machine
         "pair" -> Json.Str(if local && relayOn then s"${relayUrl.stripSuffix("/")}/#s=${keys.text}" else ""),
-        "telegram" -> telegram))
-    case other => other
+        "telegram" -> telegram)))
+    case other => done(other)
+  }
 
   private val json = List("Content-Type" -> "application/json", "Cache-Control" -> "no-store")
   private def answer(w: Web, status: Int, j: Json): Unit = w.reply(status, json, Json.print(j))
@@ -284,8 +314,8 @@ final class Daemon(args: List[String]):
       pages += s
       s.closed(() => pages -= s)
       val host = r.headers.getOrElse("host", "")
-      s.write(s"event: hello\ndata: ${Json.print(hello(host.startsWith("127.0.0.1:") ||
-        host.startsWith("localhost:")))}\n\n")
+      hello(host.startsWith("127.0.0.1:") || host.startsWith("localhost:"))(j =>
+        s.write(s"event: hello\ndata: ${Json.print(j)}\n\n"))
     else if r.method == "POST" && r.path == "/act" then
       if !sameOrigin(r) then error(w, 403, "not from this page")
       else Descent.parse(r.body) match
@@ -320,16 +350,16 @@ object Daemon:
   /** `okay-remote verify`: okay-guard's journal (every action, chained), and every session's record */
   def verify(): Unit =
     given scala.concurrent.ExecutionContext = JvmOs.ec
-    val r = Remote(OnJvm, () => 0, (_, _) => (), Judge(_))
-    r.start()
-    val journal = Daemon.journal(OnJvm.home).verify
-    JvmOs.out(journal.fold(e => s"the journal: BROKEN — $e\n", ok => s"the journal: $ok\n"))
-    val checked = r.verify
-    checked.foreach {
-      case (id, Right(n)) => JvmOs.out(s"$id: $n records, the chain unbroken\n")
-      case (id, Left(e)) => JvmOs.out(s"$id: BROKEN — $e\n")
-    }
-    JvmOs.exit(if journal.isRight && checked.forall(_._2.isRight) then 0 else 1)
+    val r = Remote(OnJvm.ports((_, _) => ()), () => 0, Judge(_))
+    r.start(() => r.go(r.verify) { checked =>
+      val journal = Daemon.journal(JvmOs.userHome).verify
+      JvmOs.out(journal.fold(e => s"the journal: BROKEN — $e\n", ok => s"the journal: $ok\n"))
+      checked.foreach {
+        case (id, Right(n)) => JvmOs.out(s"$id: $n records, the chain unbroken\n")
+        case (id, Left(e)) => JvmOs.out(s"$id: BROKEN — $e\n")
+      }
+      JvmOs.exit(if journal.isRight && checked.forall(_._2.isRight) then 0 else 1)
+    })
 
 /** THE PAGE'S FILES: its html, manifest, worker, icon (site/), its modules (web/, linked) — in the jar */
 object Page:

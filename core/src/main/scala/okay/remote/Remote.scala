@@ -1,35 +1,13 @@
 package okay.remote
 
 import okay.effects.json.{Descent, Json}
-import okay.guard.{Action, Decision, Entry, Gate, Judged, Judging, Ledger, Outcome, Verdict}
+import okay.guard.{Action, Chain, Decision, Entry, Gate, Judged, Judging, Ledger, Outcome, Verdict}
 import okay.guard.acp.{AcpClient, AgentKind, Agents, Event, Host, Line}
+import okay.scala3.*
+import okay.scala3.std.{Async, Clock, Level, Log, Random}
 import scala.collection.mutable
-
-/** THE MACHINE, AS THE REMOTE ASKS IT: its files, its time, a process in a directory. The JVM's in `daemon/`; a test's
- * in memory. Every callback on one thread */
-trait Machine:
-  def now: Long
-  def later(ms: Int)(f: => Unit): Unit
-  def randomHex(bytes: Int): String
-  def home: String
-  def read(file: String): Option[String]
-  /** written readable by its owner alone (the daemon's own files) */
-  def write(file: String, text: String): Unit
-  /** a project's file written as files are (an agent's work) */
-  def save(file: String, text: String): Unit
-  /** a command of this name on the PATH */
-  def onPath(name: String): Boolean
-  def append(file: String, text: String): Unit
-  def remove(file: String): Unit
-  /** a directory's entries' names; none if it is not one */
-  def list(dir: String): List[String]
-  /** a path as the system names it, its links followed (`/tmp` is `/private/tmp` on a Mac) */
-  def real(path: String): String
-  /** a process in `dir`, with `env` added to the daemon's own */
-  def spawn(command: List[String], dir: String, env: Map[String, String] = Map.empty): Agent
-  /** a command run to its end: its exit code and its output (at most `limit` characters) */
-  def run(command: List[String], dir: String, limit: Int = 400000)(done: (Int, String) => Unit): Unit
-  def log(text: String): Unit
+import scala.concurrent.{Future, Promise}
+import scala.util.{Failure, Success}
 
 /** THE AUDIT JOURNAL, as okay-guard keeps it (its `Ledger`'s records, chained): a record written; a policy's text kept
  * once by its hash */
@@ -61,9 +39,12 @@ object Session:
 /** THE MODELS A SESSION MAY RUN ON: Claude's, and the local ones through rozum */
 object Models:
   /** what a session may run on here: Claude Code with Claude or a local model, and the ACP agents installed */
-  def here(m: Machine): List[(String, String)] =
-    (if m.onPath("claude") then all else Nil) ++
-      Agents.all.filter(_.needs.forall(m.onPath)).map(a => s"acp:${a.id}" -> a.label)
+  def here[R[_]](using In[Processes, R]): List[(String, String)] ! R =
+    val wanted = ("claude" :: Agents.all.flatMap(_.needs)).distinct
+    wanted.foldLeft(pure[Map[String, Boolean], R](Map.empty))((acc, n) =>
+      acc.flatMap(m => Processes.onPath[R](n).map(b => m + (n -> b)))).map(has =>
+      (if has("claude") then all else Nil) ++
+        Agents.all.filter(_.needs.forall(has)).map(a => s"acp:${a.id}" -> a.label))
   /** what goes through the policy for a session on it */
   def through(model: String): String =
     Agents.of(model).fold("every tool call (Claude Code's hook)")(_.through)
@@ -93,258 +74,318 @@ final case class Jail(rozum: Boolean = false, claudeToken: Option[String] = None
 
 /**
  * THE REMOTE: the projects, the sessions, each session's agent and its steps, the policy deciding every tool call,
- * the calls that wait for a person. Over a `Machine`; the page's acts in (`act`), the agent's hook in (`hook`), the
- * page told by `tell` (an event's name, its data).
+ * the calls that wait for a person. Its work is programs over its `World` — the machine's files and processes, the
+ * pages, the time, randomness, the log — run in a place by `World.run` (the JVM's ports in `daemon/`, a test's in
+ * memory); its own memory is this object's. The page's acts in (`act`), the agent's hook in (`hook`), every answer
+ * given when its program ends.
  */
-final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
-                   judgeOf: String => Either[String, Judge], jail: () => Jail = () => Jail(),
+final class Remote(ports: World.Ports, port: () => Int, judgeOf: String => Either[String, Judge],
                    audit: Audit = Audit.none):
   import J.*
-  val base: String = s"${m.home}/.okay-remote"
+  type W[X] = World[X]
+  private given scala.concurrent.ExecutionContext = ports.ec
+
+  /** a program of the remote run in its place; what it ends with to `done` */
+  def go[A](p: A ! W)(done: A => Unit = (_: A) => ()): Unit = World.run(ports)(p).onComplete {
+    case Success(a) => done(a)
+    case Failure(e) => val _ = ports.log(Log.Entry(Level.Error, s"okay-remote: ${Option(e.getMessage).getOrElse(e)}"))
+  }
+  /** a program run for what it does: nothing waits for its end */
+  private def fire(p: Unit ! W): Unit = go(p)(_ => ())
+  private def unit: Unit ! W = pure(())
+  private def each[A, B](xs: Iterable[A])(f: A => B ! W): List[B] ! W =
+    xs.foldLeft(pure[List[B], W](Nil))((acc, a) => acc.flatMap(l => f(a).map(_ :: l))).map(_.reverse)
+  private def all(ps: Iterable[Unit ! W]): Unit ! W = ps.foldLeft(unit)((a, b) => a.flatMap(_ => b))
+  private def hex(bytes: Int): String ! W =
+    each(0 until (bytes + 7) / 8)(_ => Random.long[W]).map(_.map(n => f"$n%016x").mkString.take(bytes * 2))
+
+  // ---- ITS MEMORY
+
+  var base: String = ""
   private def file(s: String) = s"$base/$s"
   private val sessions = mutable.LinkedHashMap.empty[String, Session]
   private val kept = mutable.Map.empty[String, Vector[Step]]
+  /** the last link of each session's chain: its sequence number and hash */
+  private val heads = mutable.Map.empty[String, (Long, String)]
   private final case class Live(agent: Agent, key: String, acp: Option[AcpClient] = None)
   private val live = mutable.Map.empty[String, Live]
   private final case class Wait(session: String, id: String, tool: String, input: Json, why: String,
     answer: Verdict => Unit)
   private val waits = mutable.LinkedHashMap.empty[String, Wait]
   private var judge: Either[String, Judge] = Left("not read yet")
+  private var policyNow: String = Defaults.policy
+  /** when each session's turn began: its end's time is the remote's own */
+  private val turns = mutable.Map.empty[String, Long]
+  var jail: Jail = Jail()
   val askFor: Int = 10 * 60 * 1000
 
   /** a session's project and model, by its id (what a notification may say of it) */
   def about(id: String): Option[(String, String)] = sessions.get(id).map(x => (x.project, x.model))
+  def policy: String = policyNow
 
-  def policy: String = m.read(file("policy.policy")).getOrElse(Defaults.policy)
-
-  def start(): Unit =
-    judge = judgeOf(policy)
-    judge.left.foreach(e => m.log(s"okay-remote: the policy does not compile, every call is refused: $e\n"))
-    keepPolicy()
-    m.list(file("sessions")).filter(_.endsWith(".json")).flatMap(n => m.read(file(s"sessions/$n")))
-      .flatMap(t => Descent.parse(t).toOption).flatMap(Session.fromJson).sortBy(_.updated)
+  /** started: its home, the policy, the jail there is, the sessions kept */
+  def start(done: () => Unit = () => ()): Unit = go(starting)(_ => done())
+  def starting: Unit ! W =
+    for
+      home <- Files.home[W]
+      _ = base = s"$home/.okay-remote"
+      text <- Files.read[W](file("policy.policy"))
+      _ = { policyNow = text.getOrElse(Defaults.policy); judge = judgeOf(policyNow) }
+      _ <- judge.fold(e => Log.warn[W](s"okay-remote: the policy does not compile, every call is refused: $e"),
+        _ => unit)
+      _ = keepPolicy()
+      rozum <- Processes.onPath[W]("rozum")
+      token <- Files.read[W](file("claude-token"))
+      _ = jail = Jail(rozum, token.map(_.trim).filter(_.nonEmpty))
+      names <- Files.entries[W](file("sessions"))
+      texts <- each(names.filter(_.endsWith(".json")))(n => Files.read[W](file(s"sessions/$n")))
+    yield texts.flatten.flatMap(t => Descent.parse(t).toOption).flatMap(Session.fromJson).sortBy(_.updated)
       .foreach(s => sessions(s.id) = s.copy(running = false, busy = false, waiting = 0))
 
   // ---- THE PROJECTS: the directories with `.git` under the roots (`~/.okay-remote/roots`, a line each)
 
-  def roots: List[String] = m.read(file("roots")).map(_.linesIterator.map(_.trim).filter(_.nonEmpty).toList)
-    .filter(_.nonEmpty).getOrElse(List(s"${m.home}/work"))
-  def projects: List[String] =
-    def git(d: String) = m.list(d).contains(".git")
-    def under(d: String, depth: Int): List[String] =
-      if git(d) then List(d)
-      else if depth == 0 then Nil
-      else m.list(d).filterNot(_.startsWith(".")).sorted.flatMap(n => under(s"$d/$n", depth - 1))
-    roots.flatMap(r => under(m.real(r), 2)).distinct
+  def roots: List[String] ! W = Files.read[W](file("roots")).flatMap(r =>
+    r.map(_.linesIterator.map(_.trim).filter(_.nonEmpty).toList).filter(_.nonEmpty) match
+      case Some(rs) => pure(rs)
+      case None => Files.home[W].map(h => List(s"$h/work")))
+  def projects: List[String] ! W =
+    def under(d: String, depth: Int): List[String] ! W = Files.entries[W](d).flatMap(names =>
+      if names.contains(".git") then pure(List(d))
+      else if depth == 0 then pure(Nil)
+      else each(names.filterNot(_.startsWith(".")).sorted)(n => under(s"$d/$n", depth - 1)).map(_.flatten))
+    roots.flatMap(rs => each(rs)(r => Files.real[W](r).flatMap(under(_, 2)))).map(_.flatten.distinct)
 
   // ---- WHAT THE PAGE ASKS
 
-  def snapshot: Json = Json.Obj(Vector(
-    "projects" -> Json.Arr(projects.map(Json.Str(_)).toVector),
-    "sessions" -> Json.Arr(sessions.values.toVector.reverse.map(s => summary(s).toJson)),
-    "models" -> Json.Arr(Models.here(m).map((k, l) => Json.obj("id" -> Json.Str(k), "label" -> Json.Str(l),
-      "through" -> Json.Str(Models.through(k)))).toVector),
-    "policy" -> Json.Str(policy), "policyError" -> Json.Str(judge.left.getOrElse("")),
-    "jail" -> Json.obj("rozum" -> Json.Bool(jail().rozum), "claude" -> Json.Bool(jail().claudeJailed))))
+  def snapshot: Json ! W =
+    for
+      ps <- projects
+      ms <- Models.here[W]
+    yield Json.Obj(Vector(
+      "projects" -> Json.Arr(ps.map(Json.Str(_)).toVector),
+      "sessions" -> Json.Arr(sessions.values.toVector.reverse.map(s => summary(s).toJson)),
+      "models" -> Json.Arr(ms.map((k, l) => Json.obj("id" -> Json.Str(k), "label" -> Json.Str(l),
+        "through" -> Json.Str(Models.through(k)))).toVector),
+      "policy" -> Json.Str(policyNow), "policyError" -> Json.Str(judge.left.getOrElse("")),
+      "jail" -> Json.obj("rozum" -> Json.Bool(jail.rozum), "claude" -> Json.Bool(jail.claudeJailed))))
 
-  /** an act of the page, answered when it is done (most at once; `diff` when git has answered) */
-  def act(body: Json)(answer: Either[String, Json] => Unit): Unit =
+  /** an act of the page, answered when its program ends */
+  def act(body: Json)(answer: Either[String, Json] => Unit): Unit = go(acting(body))(answer)
+
+  def acting(body: Json): Either[String, Json] ! W =
     def s(k: String) = str(body, k).getOrElse("")
     str(body, "type").getOrElse("") match
-      case "diff" => diff(s("session"))(answer)
-      case "always" => always(s("call"))(answer)
-      case _ => answer(now(body))
-
-  private def now(body: Json): Either[String, Json] =
-    def s(k: String) = str(body, k).getOrElse("")
-    str(body, "type").getOrElse("") match
-      case "hello" => Right(snapshot)
-      case "open" => sessions.get(s("session")).toRight("no such session").map(x => Json.Obj(Vector(
-          "session" -> summary(x).toJson,
-          "steps" -> Json.Arr(steps(x.id).map(Step.toJson)),
-          "waiting" -> Json.Arr(waits.values.filter(_.session == x.id).map(waitJson).toVector))))
+      case "hello" => snapshot.map(Right(_))
+      case "diff" => diff(s("session"))
+      case "always" => always(s("call"))
+      case "open" => sessions.get(s("session")) match
+          case None => pure(Left("no such session"))
+          case Some(x) => loaded(x.id).map(_ => Right(Json.Obj(Vector(
+              "session" -> summary(x).toJson,
+              "steps" -> Json.Arr(kept(x.id).map(Step.toJson)),
+              "waiting" -> Json.Arr(waits.values.filter(_.session == x.id).map(waitJson).toVector)))))
       case "new" =>
-        if !projects.contains(s("project")) then Left("not a project here")
-        else if Models.here(m).isEmpty then Left("no coding agent is installed here")
-        else if s("task").trim.isEmpty then Left("say what to do")
-        else
-          val id = m.randomHex(6)
-          val offered = Models.here(m)
-          val model = if offered.exists(_._1 == s("model")) then s("model") else offered.headOption.fold("")(_._1)
-          val line = s("task").trim.linesIterator.next()
-          val title = if line.length <= 80 then line
-            else line.take(79).reverse.dropWhile(_ != ' ').reverse.trim + " …"
-          val x = Session(id, s("project"), model, title, created = m.now,
-            updated = m.now)
-          sessions(id) = x
-          kept(id) = Vector.empty
-          say(id, s("task")).map(_ => summary(sessions(id)).toJson)
-      case "say" => say(s("session"), s("text")).map(_ => Json.Obj.empty)
-      case "stop" => live.remove(s("session")).fold(Left("not running")) { l =>
-          l.acp.foreach(_.cancel())
-          l.agent.kill(); Right(Json.Obj.empty)
-        }
+        for
+          ps <- projects
+          offered <- Models.here[W]
+          id <- hex(6)
+          now <- Clock.now[W]
+          out <- if !ps.contains(s("project")) then pure(Left("not a project here"))
+            else if offered.isEmpty then pure(Left("no coding agent is installed here"))
+            else if s("task").trim.isEmpty then pure(Left("say what to do"))
+            else
+              val model = if offered.exists(_._1 == s("model")) then s("model") else offered.head._1
+              val line = s("task").trim.linesIterator.next()
+              val title = if line.length <= 80 then line
+                else line.take(79).reverse.dropWhile(_ != ' ').reverse.trim + " …"
+              sessions(id) = Session(id, s("project"), model, title, created = now, updated = now)
+              kept(id) = Vector.empty
+              heads(id) = (0L, Chain.start)
+              say(id, s("task")).map(_.map(_ => summary(sessions(id)).toJson))
+        yield out
+      case "say" => say(s("session"), s("text")).map(_.map(_ => Json.Obj.empty))
+      case "stop" => live.remove(s("session")) match
+          case None => pure(Left("not running"))
+          case Some(l) => l.acp.foreach(_.cancel()); l.agent.kill(); pure(Right(Json.Obj.empty))
       case "verdict" => verdict(s("call"), bool(body, "approve"), s("why"))
-      case "policy" =>
-        judgeOf(s("text")) match
-          case Left(e) => Left(e)
-          case Right(j) =>
-            m.write(file("policy.policy"), s("text")); judge = Right(j); keepPolicy()
-            tell("policy", Json.Str(s("text")))
-            Right(Json.Obj.empty)
-      case "forget" => sessions.get(s("session")).fold(Left("no such session")) { x =>
-          live.remove(x.id).foreach(_.agent.kill())
-          sessions.remove(x.id); kept.remove(x.id); heads.remove(x.id)
-          m.remove(file(s"sessions/${x.id}.json")); m.remove(file(s"sessions/${x.id}.jsonl"))
-          tell("forgot", Json.Str(x.id))
-          Right(Json.Obj.empty)
-        }
-      case other => Left(s"no act $other")
+      case "policy" => judgeOf(s("text")) match
+          case Left(e) => pure(Left(e))
+          case Right(j) => setPolicy(s("text"), j).map(_ => Right(Json.Obj.empty))
+      case "forget" => sessions.get(s("session")) match
+          case None => pure(Left("no such session"))
+          case Some(x) =>
+            live.remove(x.id).foreach(_.agent.kill())
+            sessions.remove(x.id); kept.remove(x.id); heads.remove(x.id)
+            all(List(Files.remove[W](file(s"sessions/${x.id}.json")), Files.remove[W](file(s"sessions/${x.id}.jsonl")),
+              Pages.tell[W]("forgot", Json.Str(x.id)))).map(_ => Right(Json.Obj.empty))
+      case other => pure(Left(s"no act $other"))
 
-  private def verdict(call: String, approve: Boolean, why: String): Either[String, Json] =
-    waits.remove(call).fold(Left("nothing waits for that")) { w =>
-      w.answer(if approve then Verdict.Approve(acting.get(call).fold(w.input)(_.arguments))
-        else Verdict.Refuse(if why.nonEmpty then why else "refused on the phone"))
-      changed(w.session)
-      Right(Json.Obj.empty)
-    }
+  private def setPolicy(text: String, j: Judge): Unit ! W =
+    policyNow = text; judge = Right(j); keepPolicy()
+    Files.keep[W](file("policy.policy"), text).flatMap(_ => Pages.tell[W]("policy", Json.Str(text)))
+
+  private def verdict(call: String, approve: Boolean, why: String): Either[String, Json] ! W =
+    waits.remove(call) match
+      case None => pure(Left("nothing waits for that"))
+      case Some(w) =>
+        w.answer(if approve then Verdict.Approve(acting.get(call).fold(w.input)(_.arguments))
+          else Verdict.Refuse(if why.nonEmpty then why else "refused on the phone"))
+        changed(w.session).map(_ => Right(Json.Obj.empty))
 
   /** ALWAYS ALLOW: a rule made of a waiting call, added to the policy if, added, it allows this call — then the call
    * approved. An `ask` still wins over an `allow`: then nothing is added, and the answer says which rule asks */
-  private def always(call: String)(answer: Either[String, Json] => Unit): Unit =
+  private def always(call: String): Either[String, Json] ! W =
     waits.get(call) match
-      case None => answer(Left("nothing waits for that"))
+      case None => pure(Left("nothing waits for that"))
       case Some(w) =>
-        val text = Rules.added(policy, w.tool, w.input)
+        val text = Rules.added(policyNow, w.tool, w.input)
         judgeOf(text) match
-          case Left(e) => answer(Left(s"the rule did not compile: $e"))
-          case Right(j) => j.decide(call, w.tool, w.input, sessions.get(w.session).fold("")(_.project)) {
-              (v, why) =>
-                if v != "allow" then answer(Left(s"a rule still ${if v == "deny" then "denies" else "asks for"} it" +
-                  (if why.nonEmpty then s": $why" else "") + " — change the policy to allow it"))
-                else
-                  m.write(file("policy.policy"), text); judge = Right(j); keepPolicy(); tell("policy", Json.Str(text))
-                  answer(verdict(call, true, "always allowed").map(_ => Json.obj("policy" -> Json.Str(text))))
+          case Left(e) => pure(Left(s"the rule did not compile: $e"))
+          case Right(j) =>
+            val decided = Promise[(String, String)]()
+            j.decide(call, w.tool, w.input, sessions.get(w.session).fold("")(_.project))((v, why) =>
+              val _ = decided.trySuccess((v, why)))
+            Async.fromFuture[(String, String), W](decided.future).flatMap { (v, why) =>
+              if v != "allow" then pure(Left(s"a rule still ${if v == "deny" then "denies" else "asks for"} it" +
+                (if why.nonEmpty then s": $why" else "") + " — change the policy to allow it"))
+              else setPolicy(text, j).flatMap(_ => verdict(call, true, "always allowed"))
+                .map(_.map(_ => Json.obj("policy" -> Json.Str(text))))
             }
 
   /** CHANGES: the project's `git status` and `git diff` (staged and not), as git says them */
-  private def diff(id: String)(answer: Either[String, Json] => Unit): Unit =
+  private def diff(id: String): Either[String, Json] ! W =
     sessions.get(id) match
-      case None => answer(Left("no such session"))
+      case None => pure(Left("no such session"))
       case Some(x) =>
-        m.run(List("git", "status", "--short"), x.project) { (c1, status) =>
-          if c1 != 0 then answer(Left(s"git status: ${status.take(300)}"))
-          else m.run(List("git", "diff", "HEAD", "--no-color", "--no-ext-diff"), x.project) { (c2, d) =>
-            m.run(List("git", "diff", "--no-color", "--no-ext-diff"), x.project) { (_, unborn) =>
+        Processes.run[W](List("git", "status", "--short"), x.project).flatMap { (c1, status) =>
+          if c1 != 0 then pure(Left(s"git status: ${status.take(300)}"))
+          else Processes.run[W](List("git", "diff", "HEAD", "--no-color", "--no-ext-diff"), x.project)
+            .flatMap { (c2, d) =>
               // a repository with no commit yet has no HEAD: the working tree's diff then
-              answer(Right(Json.obj("status" -> Json.Str(status), "diff" -> Json.Str(if c2 == 0 then d else unborn))))
+              Processes.run[W](List("git", "diff", "--no-color", "--no-ext-diff"), x.project).map((_, unborn) =>
+                Right(Json.obj("status" -> Json.Str(status), "diff" -> Json.Str(if c2 == 0 then d else unborn))))
             }
-          }
         }
 
   /** a person's words to a session: to its agent, started (or started again, resumed) if it is not running */
-  private def say(id: String, text: String): Either[String, Unit] =
-    if text.trim.isEmpty then Left("say something")
-    else sessions.get(id).toRight("no such session").map { x =>
-      if !live.contains(id) then run(x)
-      record(id, Step.You(text))
-      live.get(id).foreach(l => l.acp match
-        case Some(a) => a.prompt(text)
-        case None => l.agent.send(Json.print(Json.Obj(Vector("type" -> Json.Str("user"),
-            "message" -> Json.obj("role" -> Json.Str("user"), "content" -> Json.Str(text)))))))
-      sessions(id) = sessions(id).copy(busy = true, updated = m.now)
-      changed(id)
-    }
+  private def say(id: String, text: String): Either[String, Unit] ! W =
+    if text.trim.isEmpty then pure(Left("say something"))
+    else sessions.get(id) match
+      case None => pure(Left("no such session"))
+      case Some(x) =>
+        for
+          _ <- loaded(id)
+          _ <- if live.contains(id) then unit else run(x)
+          _ <- record(id, Step.You(text))
+          now <- Clock.now[W]
+          _ = turns(id) = now
+          _ = live.get(id).foreach(l => l.acp match
+            case Some(a) => a.prompt(text)
+            case None => l.agent.send(Json.print(Json.Obj(Vector("type" -> Json.Str("user"),
+                "message" -> Json.obj("role" -> Json.Str("user"), "content" -> Json.Str(text)))))))
+          _ = sessions(id) = sessions(id).copy(busy = true, updated = now)
+          _ <- changed(id)
+        yield Right(())
 
-  private def run(x: Session): Unit = Agents.of(x.model) match
+  private def run(x: Session): Unit ! W = Agents.of(x.model) match
     case Some(kind) => runAcp(x, kind)
     case None => runClaude(x)
 
   /** an agent over ACP: started in the project, its files and commands through the gate, its updates the steps */
-  private def runAcp(x: Session, kind: AgentKind): Unit =
-    val agent = m.spawn(kind.command, x.project)
+  private def runAcp(x: Session, kind: AgentKind): Unit ! W =
     // the agent's commands, run here: in rozum's jail where there is one (writes in the project only, no secrets)
-    def command(cmd: String, dir: String): Agent =
+    def command(cmd: String, dir: String): Agent ! W =
       val sh = List("/bin/sh", "-c", cmd + " 2>&1")
-      m.spawn(if jail().rozum then List("rozum", "launch", "--no-model", "--") ++ sh else sh, dir)
+      Processes.spawn[W](if jail.rozum then List("rozum", "launch", "--no-model", "--") ++ sh else sh, dir)
     // okay-guard's ACP adapter: on this machine (its files, its commands), through this gate, its events the steps
     val host = new Host:
-      def now: Long = m.now
-      def randomHex(bytes: Int): String = m.randomHex(bytes)
-      def read(path: String): Option[String] = m.read(path)
-      def write(path: String, text: String): Unit = m.save(path, text)
-      def run(cmd: String, dir: String): Line = command(cmd, dir)
-    val acp = AcpClient(host, agent, kind, x.project, x.agent,
-      (call, tool, input) => answer => gate(x.id, call, tool, input)((v, why) => answer(v == "allow", why)),
-      {
-        case Event.Began(s, a) => stepped(x.id, Step.Began(s, a))
-        case Event.Said(t) => stepped(x.id, Step.Said(t))
-        case Event.Tool(i, n, in) => stepped(x.id, Step.Tool(i, n, in))
-        case Event.Result(i, t, e) => stepped(x.id, Step.Result(i, t, e))
-        case Event.Ended(ok, r, ms) => stepped(x.id, Step.Ended(ok, r, ms, 0, 0))
-        case Event.Stopped(why) => stepped(x.id, Step.Stopped(why))
-      })
-    live(x.id) = Live(agent, m.randomHex(16), Some(acp))
-    sessions(x.id) = x.copy(running = true)
-    ended(x.id, agent)
-    acp.start()
+      def read(path: String)(done: Option[String] => Unit): Unit = go(Files.read[W](path))(done)
+      def write(path: String, text: String)(done: () => Unit): Unit = go(Files.save[W](path, text))(_ => done())
+      def run(cmd: String, dir: String)(started: Line => Unit): Unit = go(command(cmd, dir))(started)
+    for
+      agent <- Processes.spawn[W](kind.command, x.project)
+      key <- hex(16)
+    yield
+      val acp = AcpClient(host, agent, kind, x.project, x.agent,
+        (call, tool, input) => answer => gate(x.id, call, tool, input)((v, why) => answer(v == "allow", why)),
+        {
+          case Event.Began(s, a) => fire(stepped(x.id, Step.Began(s, a)))
+          case Event.Said(t) => fire(stepped(x.id, Step.Said(t)))
+          case Event.Tool(i, n, in) => fire(stepped(x.id, Step.Tool(i, n, in)))
+          case Event.Result(i, t, e) => fire(stepped(x.id, Step.Result(i, t, e)))
+          case Event.Ended(ok, r) => fire(Clock.now[W].flatMap(now =>
+              stepped(x.id, Step.Ended(ok, r, turns.get(x.id).fold(0L)(now - _), 0, 0))))
+          case Event.Stopped(why) => fire(stepped(x.id, Step.Stopped(why)))
+        })
+      live(x.id) = Live(agent, key, Some(acp))
+      sessions(x.id) = x.copy(running = true)
+      ended(x.id, agent)
+      acp.start()
 
-  /** a step of a session's agent: kept, told; its start names the agent's session (to go on with later) */
-  private def stepped(id: String, st: Step): Unit =
+  /** a step of a session's agent: kept, told; its start names the agent's session (to go on with later); a result
+   * closes its call's record in the journal */
+  private def stepped(id: String, st: Step): Unit ! W =
     st match
       case Step.Result(call, text, error) => acting.remove(call).foreach(a =>
           judging.done(a, if error then Left(text.take(400)) else Right(Json.Str(text)), None))
       case _ => ()
-    st match
+    val before: Unit ! W = st match
       case Step.Began(a, _) if a.nonEmpty && sessions.get(id).exists(_.agent != a) =>
         sessions(id) = sessions(id).copy(agent = a); save(id)
       case Step.Ended(_, _, _, _, _) => sessions.get(id).foreach(x => sessions(id) = x.copy(busy = false))
         changed(id)
-      case _ => ()
-    if sessions.contains(id) then record(id, st)
+      case _ => unit
+    before.flatMap(_ => if sessions.contains(id) then record(id, st) else unit)
 
   private def ended(id: String, agent: Agent): Unit =
     agent.ended { why =>
       if live.get(id).exists(_.agent eq agent) then live.remove(id)
-      waits.filter(_._2.session == id).keys.toList.foreach(k => waits.remove(k).foreach(_.answer(Verdict.Refuse("the agent ended"))))
+      waits.filter(_._2.session == id).keys.toList.foreach(k =>
+        waits.remove(k).foreach(_.answer(Verdict.Refuse("the agent ended"))))
       if sessions.contains(id) then
-        record(id, Step.Stopped(why))
         sessions(id) = sessions(id).copy(running = false, busy = false)
-        changed(id)
+        fire(record(id, Step.Stopped(why)).flatMap(_ => changed(id)))
     }
 
-  private def runClaude(x: Session): Unit =
-    val key = m.randomHex(16)
-    // every tool call through the hook; the daemon gone, the call is not done (exit 2: refused, the agent told)
-    val hook = s"curl -sf --max-time ${askFor / 1000 + 60} -X POST -H content-type:application/json " +
-      s"--data-binary @- http://127.0.0.1:${port()}/hook/${x.id}?k=$key || " +
-      "{ echo 'okay-remote is not reachable: the call is not done' >&2; exit 2; }"
-    val settings = Json.print(Json.obj("hooks" -> Json.obj("PreToolUse" -> Json.arr(Json.obj(
-      "matcher" -> Json.Str("*"), "hooks" -> Json.arr(Json.obj("type" -> Json.Str("command"),
-        "command" -> Json.Str(hook), "timeout" -> Json.num(askFor / 1000 + 60))))))))
-    val (command, env) = Models.command(x.model, settings, x.agent, jail())
-    val agent = m.spawn(command, x.project, env)
-    live(x.id) = Live(agent, key)
-    sessions(x.id) = x.copy(running = true)
-    agent.lines(l => Step.ofAgent(l).foreach(stepped(x.id, _)))
-    ended(x.id, agent)
+  private def runClaude(x: Session): Unit ! W =
+    hex(16).flatMap { key =>
+      // every tool call through the hook; the daemon gone, the call is not done (exit 2: refused, the agent told)
+      val hook = s"curl -sf --max-time ${askFor / 1000 + 60} -X POST -H content-type:application/json " +
+        s"--data-binary @- http://127.0.0.1:${port()}/hook/${x.id}?k=$key || " +
+        "{ echo 'okay-remote is not reachable: the call is not done' >&2; exit 2; }"
+      val settings = Json.print(Json.obj("hooks" -> Json.obj("PreToolUse" -> Json.arr(Json.obj(
+        "matcher" -> Json.Str("*"), "hooks" -> Json.arr(Json.obj("type" -> Json.Str("command"),
+          "command" -> Json.Str(hook), "timeout" -> Json.num(askFor / 1000 + 60))))))))
+      val (command, env) = Models.command(x.model, settings, x.agent, jail)
+      Processes.spawn[W](command, x.project, env).map { agent =>
+        live(x.id) = Live(agent, key)
+        sessions(x.id) = x.copy(running = true)
+        agent.lines(l => Step.ofAgent(l).foreach(st => st match
+          case Step.Ended(ok, t, _, cost, n) => fire(Clock.now[W].flatMap(now =>
+              stepped(x.id, Step.Ended(ok, t, turns.get(x.id).fold(0L)(now - _), cost, n))))
+          case other => fire(stepped(x.id, other))))
+        ended(x.id, agent)
+      }
+    }
 
   // ---- THE HOOK: a tool call the agent is about to make, decided
 
   /** Claude Code's PreToolUse hook's input: the answer is the hook's output (JSON), or a status and why */
   def hook(id: String, key: String, body: Json)(answer: Either[(Int, String), Json] => Unit): Unit =
     if !live.get(id).exists(l => Secret.same(l.key, key)) then answer(Left((403, "not this session's")))
-    else
-      val call = str(body, "tool_use_id").getOrElse(m.randomHex(8))
+    else go(hex(8)) { fresh =>
+      val call = str(body, "tool_use_id").getOrElse(fresh)
       val tool = str(body, "tool_name").getOrElse("?")
       val input = get(body, "tool_input").getOrElse(Json.Obj.empty)
       def out(verdict: String, why: String) = answer(Right(Json.obj("hookSpecificOutput" -> Json.Obj(Vector(
         "hookEventName" -> Json.Str("PreToolUse"), "permissionDecision" -> Json.Str(verdict),
         "permissionDecisionReason" -> Json.Str(if why.nonEmpty then why else s"okay-remote: $verdict"))))))
       gate(id, call, tool, input)(out)
+    }
 
   /** THE GATE (okay-guard's `Judging`): a call of the agent made an okay-guard `Action` — its tool the operation, the
-   * agent's kind the service, its input and `cwd` the arguments — and decided by okay-guard's own program: the policy,
+   * agent's kind the service, its input and `cwd` the arguments — and decided by okay-guard's own program: the
+   * policy,
    * a person asked if it asks (the phone; refused when the time is up), each step a journal entry. The answer: `allow`,
    * or `deny` and why; the action's record closed when its result comes (`stepped`) */
   def gate(id: String, call: String, tool: String, input: Json)(answer: (String, String) => Unit): Unit =
@@ -372,25 +413,24 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
   /** what okay-guard's program asks of this place: the policy, the person (the phone), the clock, the journal */
   private val place: Gate = new Gate:
     def rules(call: okay.guard.Call): List[okay.guard.Rule] = Nil
-    def now: Long = m.now
+    def now: Long = ports.time()
     override def decide(call: okay.guard.Call, answer: Judged => Unit): Unit = judge match
       case Right(j) => j.guard.decide(call, answer)
       case Left(e) => answer(Judged(Decision.Block(-1, s"the policy does not compile: $e")))
     override def approved(call: okay.guard.Call): Unit = judge.foreach(_.guard.approved(call))
     def ask(call: okay.guard.Call, reason: String, answer: Verdict => Unit): Unit =
-      val key = J.str(call.id, "").getOrElse(call.id match { case Json.Str(s) => s; case o => Json.print(o) })
+      val key = call.id match { case Json.Str(s) => s; case o => Json.print(o) }
       val id = callers.getOrElse(key, "")
       val input = call.arguments match
         case o: Json.Obj => Json.Obj(o.fields.filterNot(_._1 == "cwd"))
         case other => other
       val w = Wait(id, key, call.operation, input, first(reason), answer)
       waits(key) = w
-      tell("waiting", waitJson(w))
-      changed(id)
-      m.later(askFor)(waits.remove(key).foreach { w =>
-        w.answer(Verdict.TimedOut)
-        changed(id)
-      })
+      fire(Pages.tell[W]("waiting", waitJson(w)).flatMap(_ => changed(id)))
+      // no answer in time: refused
+      fire(Clock.sleep[W](askFor).flatMap(_ => waits.remove(key) match
+        case Some(w) => w.answer(Verdict.TimedOut); changed(id)
+        case None => unit))
     def recorded(e: Entry): Unit =
       ledger(e)
       val key = e.id.collect { case Json.Str(s) => s }.getOrElse("")
@@ -398,8 +438,8 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
         (e.kind, e.method) match
           case (Entry.Kind.Decided, v @ ("pass" | "block" | "ask")) =>
             val word = v match { case "pass" => "allow"; case "block" => "deny"; case _ => "ask" }
-            record(id, Step.Decided(key, word, if word == "allow" then "" else first(e.note)))
-          case (Entry.Kind.Verdict, v) => record(id, Step.Decided(key, v, first(e.note)))
+            fire(record(id, Step.Decided(key, word, if word == "allow" then "" else first(e.note))))
+          case (Entry.Kind.Verdict, v) => fire(record(id, Step.Decided(key, v, first(e.note))))
           case _ => ()
       }
   private val judging = new Judging(place)(okay.effects.machine.Machine)
@@ -408,18 +448,16 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
     why.split("; ").headOption.getOrElse(why).replaceFirst("^rule \\d+: ", "")
 
   // ---- THE JOURNAL (okay-guard's): one record an action, with its decision's proof and the policy it was made by
-  private def policyHash: String = "sha256:" + okay.guard.Sha256.hex(policy)
-  private def keepPolicy(): Unit = audit.policy(policyHash, policy)
+  private def policyHash: String = "sha256:" + okay.guard.Sha256.hex(policyNow)
+  private def keepPolicy(): Unit = audit.policy(policyHash, policyNow)
   private val ledger = new Ledger(call => okay.guard.Context(
     call.context match { case o: Json.Obj => o.get("session").collect { case Json.Str(s) => s }.getOrElse("");
       case _ => "" }, call.service, None, Json.obj("hash" -> Json.Str(policyHash))), audit.record)
 
   /** each session's record checked: its chain unbroken, or where it breaks */
-  def verify: List[(String, Either[String, Int])] = sessions.keys.toList.sorted.map { id =>
-    val records = m.read(file(s"sessions/$id.jsonl")).toList.flatMap(_.linesIterator)
-      .flatMap(l => Descent.parse(l).toOption)
-    id -> okay.guard.Chain.verify(records)
-  }
+  def verify: List[(String, Either[String, Int])] ! W =
+    each(sessions.keys.toList.sorted)(id => Files.read[W](file(s"sessions/$id.jsonl")).map(text =>
+      id -> Chain.verify(text.toList.flatMap(_.linesIterator).flatMap(l => Descent.parse(l).toOption))))
 
   // ---- KEEPING AND TELLING
 
@@ -429,33 +467,31 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
   private def summary(x: Session): Session = x.copy(running = live.contains(x.id),
     waiting = waits.values.count(_.session == x.id))
 
-  /** the last link of each session's chain: its sequence number and hash */
-  private val heads = mutable.Map.empty[String, (Long, String)]
-  private def head(id: String): (Long, String) = heads.getOrElseUpdate(id,
-    m.read(file(s"sessions/$id.jsonl")).flatMap(_.linesIterator.toList.lastOption)
-      .flatMap(l => Descent.parse(l).toOption)
-      .fold((0L, okay.guard.Chain.start))(j => (okay.guard.Chain.seqOf(j), okay.guard.Chain.hashOf(j))))
+  /** a session's steps and the head of its chain, read from its file if they are not in memory yet */
+  private def loaded(id: String): Unit ! W =
+    if kept.contains(id) && heads.contains(id) then unit
+    else Files.read[W](file(s"sessions/$id.jsonl")).map { text =>
+      val records = text.toVector.flatMap(_.linesIterator).flatMap(l => Descent.parse(l).toOption)
+      if !kept.contains(id) then kept(id) = records.flatMap(Step.fromJson)
+      if !heads.contains(id) then heads(id) = records.lastOption.fold((0L, Chain.start))(j =>
+        (Chain.seqOf(j), Chain.hashOf(j)))
+    }
 
-  private def record(id: String, st: Step): Unit =
-    kept(id) = steps(id) :+ st
-    val (seq, prev) = head(id)
-    val linked = okay.guard.Chain.link(seq + 1, prev, Step.toJson(st))
-    heads(id) = (seq + 1, okay.guard.Chain.hashOf(linked))
-    m.append(file(s"sessions/$id.jsonl"), Json.print(linked) + "\n")
-    tell("step", Json.obj("session" -> Json.Str(id), "step" -> Step.toJson(st)))
+  private def record(id: String, st: Step): Unit ! W =
+    loaded(id).flatMap { _ =>
+      kept(id) = kept(id) :+ st
+      val (seq, prev) = heads(id)
+      val linked = Chain.link(seq + 1, prev, Step.toJson(st))
+      heads(id) = (seq + 1, Chain.hashOf(linked))
+      Files.append[W](file(s"sessions/$id.jsonl"), Json.print(linked) + "\n")
+        .flatMap(_ => Pages.tell[W]("step", Json.obj("session" -> Json.Str(id), "step" -> Step.toJson(st))))
+    }
 
-  private def loadSteps(id: String): Vector[Step] = m.read(file(s"sessions/$id.jsonl")).toVector
-    .flatMap(_.linesIterator).flatMap(l => Descent.parse(l).toOption).flatMap(Step.fromJson)
+  private def save(id: String): Unit ! W =
+    sessions.get(id).fold(unit)(x => Files.keep[W](file(s"sessions/$id.json"), Json.print(x.toJson)))
 
-  private def save(id: String): Unit =
-    sessions.get(id).foreach(x => m.write(file(s"sessions/$id.json"), Json.print(x.toJson)))
-
-  private def changed(id: String): Unit =
-    save(id)
-    sessions.get(id).foreach(x => tell("session", summary(x).toJson))
-
-  // the steps of the sessions read when first asked
-  private def steps(id: String): Vector[Step] = kept.getOrElseUpdate(id, loadSteps(id))
+  private def changed(id: String): Unit ! W =
+    save(id).flatMap(_ => sessions.get(id).fold(unit)(x => Pages.tell[W]("session", summary(x).toJson)))
 
 /** comparing secrets in a time that does not tell how much of them matched */
 object Secret:

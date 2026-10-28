@@ -7,49 +7,14 @@ import scala.concurrent.ExecutionContext
 class RemoteSuite extends munit.FunSuite:
   given ExecutionContext = ExecutionContext.parasitic
 
-  /** a machine in memory: its files a map, its one agent scripted by the test */
-  final class Fake extends Machine:
-    val files = mutable.Map.empty[String, String]
-    val sent = mutable.Buffer.empty[String]
-    var spawned: List[(List[String], String)] = Nil
-    var onLine: String => Unit = _ => ()
-    var onEnd: String => Unit = _ => ()
-    val timers = mutable.Buffer.empty[() => Unit]
-    def now = 1000L
-    def later(ms: Int)(f: => Unit) = timers += (() => f)
-    private var n = 0
-    def randomHex(bytes: Int) = { n += 1; f"$n%02d" * bytes }
-    def home = "/h"
-    def read(f: String) = files.get(f)
-    def write(f: String, t: String) = files(f) = t
-    def save(f: String, t: String) = files(f) = t
-    def onPath(name: String) = name == "claude"
-    def append(f: String, t: String) = files(f) = files.getOrElse(f, "") + t
-    def remove(f: String) = { files.remove(f); () }
-    def list(d: String) = d match
-      case "/h/work" => List("a", "b")
-      case "/h/work/a" => List(".git", "src")
-      case "/h/work/b" => List("x")
-      case "/h/work/b/x" => List(".git")
-      case "/h/.okay-remote/sessions" => files.keys.filter(_.startsWith(d + "/")).map(_.drop(d.length + 1)).toList
-      case _ => Nil
-    var envs: List[Map[String, String]] = Nil
-    var ran: List[List[String]] = Nil
-    var runAnswer: List[String] => (Int, String) = _ => (0, "")
-    def run(c: List[String], d: String, limit: Int)(done: (Int, String) => Unit) =
-      ran ::= c
-      val (code, out) = runAnswer(c)
-      done(code, out)
-    def spawn(c: List[String], d: String, env: Map[String, String]): Agent =
-      spawned ::= (c, d)
-      envs ::= env
-      new Agent:
-        def send(l: String) = { sent += l; () }
-        def lines(f: String => Unit) = onLine = f
-        def ended(f: String => Unit) = onEnd = f
-        def kill() = onEnd("killed")
-    def log(t: String) = ()
-    def real(p: String) = p
+  type Fake = MemoryWorld
+  val dirs: String => List[String] = {
+    case "/h/work" => List("a", "b")
+    case "/h/work/a" => List(".git", "src")
+    case "/h/work/b" => List("x")
+    case "/h/work/b/x" => List(".git")
+    case _ => Nil
+  }
 
   val records = mutable.Buffer.empty[Json]
   val policies = mutable.Map.empty[String, String]
@@ -58,12 +23,12 @@ class RemoteSuite extends munit.FunSuite:
     def policy(hash: String, text: String): Unit = policies(hash) = text
 
   def made(jail: Jail = Jail()): (Fake, Remote, mutable.Buffer[(String, Json)]) =
-    val m = Fake()
-    val told = mutable.Buffer.empty[(String, Json)]
+    val m = MemoryWorld(dirs, n => n == "claude" || (jail.rozum && n == "rozum"))
+    jail.claudeToken.foreach(t => m.files("/h/.okay-remote/claude-token") = t)
     records.clear()
-    val r = Remote(m, () => 7788, (e, j) => told += e -> j, Judge(_), () => jail, audit)
+    val r = Remote(m.ports, () => 7788, Judge(_), audit)
     r.start()
-    (m, r, told)
+    (m, r, m.told)
 
   extension (r: Remote)
     def act1(j: Json): Either[String, Json] =
@@ -72,8 +37,8 @@ class RemoteSuite extends munit.FunSuite:
       out
 
   test("the projects are the repositories under the roots") {
-    val (_, r, _) = made()
-    assertEquals(r.projects, List("/h/work/a", "/h/work/b/x"))
+    val (m, r, _) = made()
+    assertEquals(m.value(r.projects), List("/h/work/a", "/h/work/b/x"))
   }
 
   test("a session: the agent started in its project, the task sent, its lines steps") {
@@ -192,10 +157,10 @@ class RemoteSuite extends munit.FunSuite:
     val (m, r, _) = made()
     val (id, _) = started(r, m)
     m.onLine("""{"type":"assistant","message":{"content":[{"type":"text","text":"On it."}]}}""")
-    assertEquals(r.verify.map(_._2), List(Right(2)))
+    assertEquals(m.value(r.verify).map(_._2), List(Right(2)))
     val f = s"/h/.okay-remote/sessions/$id.jsonl"
     m.files(f) = m.files(f).replace("On it.", "Off it.")
-    assert(r.verify.head._2.isLeft)
+    assert(m.value(r.verify).head._2.isLeft)
   }
 
   test("the jail: a local model in rozum; Claude in it only with a token, and the token in the environment") {
