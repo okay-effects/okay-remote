@@ -20,12 +20,14 @@ object Page:
   final case class Info(projects: List[String] = Nil, sessions: Vector[Session] = Vector.empty,
     models: List[(String, String)] = Nil, through: Map[String, String] = Map.empty, policy: String = "",
     policyError: String = "",
-    addresses: List[String] = Nil, pair: String = "", rozum: Boolean = false, claudeJailed: Boolean = false)
+    addresses: List[String] = Nil, pair: String = "", rozum: Boolean = false, claudeJailed: Boolean = false,
+    bot: String = "", linked: Boolean = false)
 
   final case class State(info: Info = Info(), place: String = "sessions", open: Option[String] = None,
     steps: Map[String, Vector[Step]] = Map.empty, waiting: Vector[Json] = Vector.empty, live: Option[Boolean] = None,
     problem: Option[String] = None, unfolded: Set[String] = Set.empty, address: String = "", saved: Boolean = false,
-    unpaired: Boolean = false, changes: Option[(String, String)] = None, note: Option[String] = None):
+    unpaired: Boolean = false, changes: Option[(String, String)] = None, note: Option[String] = None,
+    tgLink: Option[String] = None):
     def session: Option[Session] = open.flatMap(id => info.sessions.find(_.id == id))
     def waitsFor(call: String): Option[Json] = waiting.find(w => J.str(w, "call").contains(call))
 
@@ -45,11 +47,17 @@ object Page:
     case Always(call: String)
     case Changes
     case Unpair
+    case TelegramLink
+    case TelegramUnlink
+    case CopyPairing
+    case Pair(link: String)
 
   enum Ask:
     case Act(body: Json, after: (State, Either[String, Json]) => State)
     /** the pairing given up here */
     case Forget
+    case Copy
+    case Paste(link: String)
 
   // ---- THE PROGRAM
 
@@ -65,7 +73,11 @@ object Page:
       val (next, asks) = step(s, m)
       asks.foldLeft(pure[State, Of](next))((p, ask) => p.flatMap(st => ask match
         case Ask.Act(body, after) => live(Live.Act(body)).map(after(st, _))
-        case Ask.Forget => live(Live.Unpair()).map(_ => st)))
+        case Ask.Forget => live(Live.Unpair()).map(_ => st)
+        case Ask.Copy => live(Live.CopyPairing()).map(ok => st.copy(note = Some(if ok then "Copied. Paste it in " +
+            "okay-remote in Telegram (or another browser) to pair it too." else "Nothing to copy here.")))
+        case Ask.Paste(link) => live(Live.Pair(link)).map(ok =>
+            if ok then st else st.copy(problem = Some("That is not a pairing link: it has #s= and 43 letters.")))))
         .flatMap(loop(_, events))
     }
 
@@ -86,6 +98,12 @@ object Page:
           case Right(j) =>
             st.copy(changes = Some((J.str(j, "status").getOrElse(""), J.str(j, "diff").getOrElse(""))))))))
     case Msg.Unpair => (s.copy(unpaired = true, live = Some(false)), List(Ask.Forget))
+    case Msg.CopyPairing => (s.copy(problem = None), List(Ask.Copy))
+    case Msg.Pair(link) => (s.copy(problem = None), List(Ask.Paste(link)))
+    case Msg.TelegramLink => (s.copy(problem = None), List(act("telegram-link")((st, r) => r match
+        case Left(e) => st.copy(problem = Some(e))
+        case Right(j) => st.copy(tgLink = J.str(j, "url")))))
+    case Msg.TelegramUnlink => (s.copy(tgLink = None), List(act("telegram-unlink")(failed)))
     case Msg.Tick => (s, Nil)
     case Msg.Fold(k) => (s.copy(unfolded = if s.unfolded(k) then s.unfolded - k else s.unfolded + k), Nil)
     case Msg.Open(id) => (s.copy(place = "session", open = Some(id), problem = None, note = None),
@@ -119,6 +137,9 @@ object Page:
   def came(s: State, e: (String, Json)): State = e match
     case ("live", Json.Bool(b)) => s.copy(live = Some(b))
     case ("unpaired", _) => s.copy(unpaired = true)
+    case ("telegram", j) =>
+      s.copy(info = s.info.copy(bot = J.str(j, "bot").getOrElse(""), linked = J.bool(j, "linked")),
+        tgLink = if J.bool(j, "linked") then None else s.tgLink)
     case ("hello", j) => s.copy(live = Some(true), info = Info(
         J.arr(j, "projects").toList.collect { case Json.Str(p) => p },
         J.arr(j, "sessions").flatMap(Session.fromJson),
@@ -126,7 +147,8 @@ object Page:
         J.arr(j, "models").toList.flatMap(m => for i <- J.str(m, "id"); t <- J.str(m, "through") yield i -> t).toMap,
         J.str(j, "policy").getOrElse(""), J.str(j, "policyError").getOrElse(""),
         J.arr(j, "addresses").toList.collect { case Json.Str(a) => a }, J.str(j, "pair").getOrElse(""),
-        J.get(j, "jail").exists(J.bool(_, "rozum")), J.get(j, "jail").exists(J.bool(_, "claude"))))
+        J.get(j, "jail").exists(J.bool(_, "rozum")), J.get(j, "jail").exists(J.bool(_, "claude")),
+        J.get(j, "telegram").flatMap(J.str(_, "bot")).getOrElse(""), J.get(j, "telegram").exists(J.bool(_, "linked"))))
     case ("session", j) => Session.fromJson(j).fold(s)(upsert(s, _))
     case ("step", j) =>
       (J.str(j, "session"), J.get(j, "step").flatMap(Step.fromJson)) match
@@ -154,13 +176,18 @@ object Page:
   def render(s: State): Screen[Msg] =
     if s.unpaired then unpaired else rendered(s)
 
-  def unpaired: Screen[Msg] = Screen[Msg]("okay-remote", List(
+  def unpaired: Screen[Msg] =
+    val paste = Form.one(Field.text("Or paste a pairing link"))
+    Screen[Msg]("okay-remote", List(
     Part.block("top")(Part.block("brand")(Part.text("okay-remote")), Part.block("live-off")(Part.text("not paired"))),
     Part.block("pairing")(Part.text("Pair this phone with your computer"),
       Part.text("On your computer: java -jar okay-remote.jar --relay, open the address it prints, then Phone. " +
         "Scan its QR code with this phone's camera. The code holds a secret that never leaves your devices: the " +
         "relay " +
-        "passes your sessions sealed end to end, and cannot read them."))), Nil)
+        "passes your sessions sealed end to end, and cannot read them."),
+      Part.block("small")(Part.text("In Telegram, or another browser: on a phone already paired, Phone → Copy the " +
+        "pairing link, and paste it here.")), paste)),
+    List(Button.submit("Pair", paste)(Msg.Pair(_): Msg)))
 
   def rendered(s: State): Screen[Msg] =
     val waits = s.waiting.size
@@ -312,6 +339,19 @@ object Page:
       Part.block("small")(Part.text(sandbox))) ++ notes ++ List(Part.block("policy")(form)),
       List(Button.submit("Save", form)(Msg.PolicySave(_): Msg)))
 
+  /** TELEGRAM: told when something waits — linked by a link the bot takes, or unlinked */
+  def telegram(s: State): (List[Part], List[Button[Msg]]) =
+    if s.info.bot.isEmpty then (Nil, Nil)
+    else if s.info.linked then (List(Part.block("telegram")(Part.text("Telegram: linked — @" + s.info.bot +
+      " tells you when a call waits and when an agent is done (only that, never what)."), Part.slot("tg"))),
+      List(Button("Unlink Telegram", Style.Danger)(Msg.TelegramUnlink: Msg).at("tg")))
+    else s.tgLink match
+      case Some(link) => (List(Part.block("telegram")(Part.text("Open this link on your phone (or scan it), then " +
+          "Start: @" + s.info.bot + " will tell you when a call waits. It works once, for ten minutes."),
+          Part.block("qr")(Part.qr(link, "link Telegram")), Part.block("address")(Part.link(link, link)))), Nil)
+      case None => (List(Part.block("telegram")(Part.text("Telegram: be told when a call waits, with the page " +
+          "closed."), Part.slot("tg"))), List(Button("Link Telegram")(Msg.TelegramLink: Msg).at("tg")))
+
   def phone(s: State): (List[Part], List[Button[Msg]]) =
     val token = s.address.split("\\?t=").drop(1).headOption.getOrElse("")
     val port = s.address.split("://").drop(1).headOption.flatMap(_.split('/').headOption).flatMap(_.split(':')
@@ -320,14 +360,16 @@ object Page:
     val warning = Part.block("small")(Part.text("Whoever has this code runs agents on this machine: show it to " +
       "no one " +
       "else. To shut every paired phone out: okay-remote --pair-again."))
+    val (tgParts, tgButtons) = telegram(s)
     if s.address.isEmpty then
       // through the relay: this phone is paired
       (List(Part.info("This phone is paired: your sessions reach it through the relay, sealed end to end."),
-        Part.slot("unpair")), List(Button("Unpair this phone", Style.Danger)(Msg.Unpair: Msg).at("unpair")))
+        Part.slot("unpair")) ++ tgParts, List(Button("Copy the pairing link")(Msg.CopyPairing: Msg).at("unpair"),
+        Button("Unpair this phone", Style.Danger)(Msg.Unpair: Msg).at("unpair")) ++ tgButtons)
     else if s.info.pair.nonEmpty then
       (List(Part.block("small")(Part.text("Scan it with your phone: it works from anywhere, through the relay, " +
         "sealed end to end.")), Part.block("qr")(Part.qr(s.info.pair, "pair your phone"))) ++
-        lan.map(u => Part.block("small")(Part.text(s"On the same network: $u"))) :+ warning, Nil)
+        lan.map(u => Part.block("small")(Part.text(s"On the same network: $u"))) ++ (warning :: tgParts), tgButtons)
     else if lan.nonEmpty then
       (lan.map(u => Part.block("qr")(Part.qr(u, "this page on your phone"), Part.block("address")(Part.text(u)))) :+
         warning, Nil)

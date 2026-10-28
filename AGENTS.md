@@ -16,6 +16,7 @@ Read before anything else; then `specs/remote.md`. A change of design is a chang
   session in the relay.
 - `sbt coreJVM/test`; `sbt fatJar` then `scripts/e2e/security.sh` (after any change to the daemon's server) and
   `node scripts/e2e/phone.js`; `sbt relayDist`, `npx wrangler dev --port 8799` in relay/, `node
-  scripts/e2e/relay.js` (real Claude Haiku runs, the page at a phone's size, screenshots in /tmp/or-*.png). Deploy
+  scripts/e2e/relay.js`, `node scripts/e2e/telegram.js` (a fake Bot API) (real Claude Haiku runs, the page at a
+  phone's size, screenshots in /tmp/or-*.png). Deploy
   the relay: `relay/deploy.sh` (relay/.env, never committed). Lines at most 120 wide. Commits: plain messages, no
   attribution trailers.

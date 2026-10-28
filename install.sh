@@ -12,7 +12,8 @@ say() { printf '%s\n' "$*"; }
 fail() { printf 'okay-remote: %s\n' "$*" >&2; exit 1; }
 
 command -v curl >/dev/null || fail "curl is needed"
-command -v java >/dev/null || fail "Java 17 or newer is needed: brew install openjdk@21 (macOS), or https://adoptium.net"
+command -v java >/dev/null ||
+  fail "Java 17 or newer is needed: brew install openjdk@21 (macOS), or https://adoptium.net"
 major=$(java -version 2>&1 | sed -n 's/.*version "\([0-9]*\).*/\1/p' | head -1)
 [ "${major:-0}" -ge 17 ] || fail "Java 17 or newer is needed (this is Java ${major:-?})"
 
@@ -59,8 +60,9 @@ PLIST
       else
         mkdir -p "$(dirname "$unit")"
         [ $# -gt 0 ] || set -- --relay
-        printf '[Unit]\nDescription=okay-remote\n\n[Service]\nEnvironment=PATH=%s\nExecStart=%s -jar %s %s\nRestart=always\n\n[Install]\nWantedBy=default.target\n' \
-          "$PATH" "$(command -v java)" "$jar" "$*" > "$unit"
+        unit_text='[Unit]\nDescription=okay-remote\n\n[Service]\nEnvironment=PATH=%s\nExecStart=%s -Duser.home=%s'
+        unit_text="$unit_text"' -jar %s %s\nRestart=always\n\n[Install]\nWantedBy=default.target\n'
+        printf "$unit_text" "$PATH" "$(command -v java)" "$HOME" "$jar" "$*" > "$unit"
         systemctl --user daemon-reload && systemctl --user enable --now okay-remote
       fi
       echo "okay-remote runs now, and with every login; its log: ~/.okay-remote/daemon.log" ;;
@@ -69,7 +71,8 @@ PLIST
       else systemctl --user disable --now okay-remote 2>/dev/null || true; rm -f "$unit"; fi
       echo "okay-remote no longer starts by itself" ;;
     status)
-      if [ "$(uname)" = Darwin ]; then launchctl print "gui/$(id -u)/$label" 2>/dev/null | grep -E "state|pid" || echo "not installed"
+      if [ "$(uname)" = Darwin ]; then
+        launchctl print "gui/$(id -u)/$label" 2>/dev/null | grep -E "state|pid" || echo "not installed"
       else systemctl --user status okay-remote --no-pager 2>/dev/null || echo "not installed"; fi
       grep -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$HOME/.okay-remote/daemon.log" 2>/dev/null | tail -1 ;;
     *) echo "okay-remote service install [options, --relay by default] | uninstall | status"; exit 1 ;;
@@ -82,8 +85,12 @@ chmod +x "$cmd_dir/okay-remote"
 
 say ""
 say "okay-remote $(java -jar "$bin/okay-remote.jar" --version | sed 's/okay-remote //') installed: $cmd_dir/okay-remote"
-case ":$PATH:" in *":$cmd_dir:"*) ;; *) say "add it to your PATH: echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc";; esac
-command -v claude >/dev/null || say "note: no coding agent found yet — install Claude Code (https://claude.com/claude-code) or another"
+case ":$PATH:" in
+  *":$cmd_dir:"*) ;;
+  *) say "add it to your PATH: echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc" ;;
+esac
+command -v claude >/dev/null ||
+  say "note: no coding agent found yet — install Claude Code (https://claude.com/claude-code) or another"
 say ""
 say "start it:            okay-remote --relay"
 say "or with every login: okay-remote service install"

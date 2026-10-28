@@ -102,6 +102,28 @@ Tried end to end (`scripts/e2e/agents.js "<label>"`, a phone's screen, 2026-10-2
 Found on the way: with its own approval mode `auto`, Qwen Code ran a command itself, asking no one — so the approval
 mode is the daemon's to set, per agent. When the daemon stops, every process it started stops with it.
 
+## Telegram: told when something waits (2026-10-28)
+
+The phone is told — with the page closed — when a call waits for a decision, and when a turn is done, by a Telegram
+bot of the relay. What is told is only that, and the project's name: never a command, a path, a word of the agent.
+The decisions stay in the page (in the browser, or the same page as the bot's Mini App), sealed end to end.
+
+- **Linking a chat**: on the machine's page, Phone → Telegram → a link `t.me/<bot>?start=<code>`, the code one-time
+  and random (10 minutes). The daemon gives the code to its room (`ctl:link`, a plain control line only a daemon may
+  send, never passed to the phones); the room names it to a `Link` object (memory, by the code). Telegram's `/start
+  <code>` comes to the relay's webhook (`/tg`, Telegram's secret header checked), which finds the room by the code
+  and binds the chat: the room tells the daemon `ctl:bound <chat> <sig>`, `sig` an HMAC of the room and the chat by
+  the relay's secret. The daemon keeps the chat and `sig` (relay.json) and gives them back at every connection
+  (`ctl:chat`), the room taking them only with a valid `sig`: the relay keeps nothing, and no daemon can bind a chat
+  that did not ask.
+- **Telling**: the daemon sends `ctl:notify {"text"}` — at most one a minute per session and kind — and the room
+  sends it to the bound chat with a button that opens the page (a Mini App). A chat that blocked the bot is unbound
+  (`ctl:unbound`). Unlink on the page forgets the chat.
+- **The Mini App**: the page itself, from the relay. Paired once by pasting the pairing link (Phone → Copy the
+  pairing link on a paired page): the secret goes by the clipboard, never through Telegram.
+- The relay's secrets: `TG_TOKEN` (the bot's), `TG_SECRET` (the webhook's and the signatures'); `TG_BOT` its name;
+  `relay/telegram-setup.sh` sets them and the webhook, the token typed, never shown. No bot: no Telegram on the page.
+
 ## Working with it
 
 - **Always allow**: on a card that waits, a rule made from the call (a command exactly; a file's directory; a tool),
@@ -111,4 +133,4 @@ mode is the daemon's to set, per agent. When the daemon stops, every process it 
 
 ## Later
 
-- Notifications (Web Push) when a call waits; diffs of the files changed; several machines.
+- Several machines; approving from the Telegram message itself (it would show the command to Telegram).

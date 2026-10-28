@@ -41,6 +41,17 @@ To start okay-remote with every login, so the phone can always reach it while th
 okay-remote service install      # okay-remote service status | okay-remote service uninstall
 ```
 
+## Be told in Telegram
+
+okay-remote can tell you in Telegram when an agent waits for your decision and when it is done — even with its page
+closed. On the computer's page: **Phone → Link Telegram**, open the link on your phone and press **Start**. The
+messages say only that something waits and in which project — never a command, a file or a word of the agent; you
+decide on the page, which the message's button opens inside Telegram (pair it once there: on a paired page, **Phone
+→ Copy the pairing link**, and paste it into the Telegram one). **Unlink Telegram** on the page stops it.
+
+With your own relay, make your own bot: Telegram → @BotFather → `/newbot`, then `relay/telegram-setup.sh <your
+relay's URL>` (it asks for the bot's token, never shows it, and keeps it only in the relay's secrets).
+
 ## Work
 
 - **New**: a project, an agent, a task. **Projects** are the git repositories under `~/work`; to choose others, list
@@ -49,7 +60,8 @@ okay-remote service install      # okay-remote service status | okay-remote serv
   has **Approve**, **Always allow** (a rule for calls like it is added to the policy) and **Refuse**. **Next** sends
   more words; **Changes** shows `git status` and `git diff`; **Stop** stops the agent (writing to it again starts it
   again, where it was); **Forget** removes a stopped session.
-- **Policy**: what the agent may do, in [okay-guard's language](https://okay-effects.github.io/okay-guard/docs/policy.html).
+- **Policy**: what the agent may do, in okay-guard's
+  [language](https://okay-effects.github.io/okay-guard/docs/policy.html).
   The one it starts with: reading goes; writing in the project goes; a few harmless commands (`ls`, `git status`,
   `git diff`, `sbt`, `cargo`, …) go; chains of commands, `git push`, the web, and anything else wait for you; `sudo`
   never runs.

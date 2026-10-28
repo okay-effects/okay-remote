@@ -48,7 +48,8 @@ object Keys:
  * sealed and opened here (AES-GCM, the pairing's key); what the relay passes it cannot read. A frame not from a
  * phone, out of time or seen before is dropped (`Envelope`). Everything given to `got` on the daemon's loop.
  */
-final class Relay(base: String, keys: Keys, got: (String, Json) => Unit, said: String => Unit):
+final class Relay(base: String, keys: Keys, got: (String, Json) => Unit, said: String => Unit,
+                  control: String => Unit = _ => (), connected: () => Unit = () => ()):
   private val client = HttpClient.newHttpClient()
   private val seen = Envelope.Seen()
   private val random = new SecureRandom
@@ -74,7 +75,11 @@ final class Relay(base: String, keys: Keys, got: (String, Json) => Unit, said: S
       if e != null then JvmOs.loop.execute(() => dropped(s"not reached: ${Option(e.getCause).getOrElse(e).getMessage}"))
       else
         socket = Some(ws)
-        JvmOs.loop.execute(() => { backoff = 1000; if !up then said("the relay is reached"); up = true })
+        JvmOs.loop.execute(() => {
+          backoff = 1000; if !up then said("the relay is reached"); up = true; connected()
+          // a notification made while the line was down: given now, after the chat is given back
+          held.foreach(plain); held = None
+        })
         beat(ws)
     }
 
@@ -91,6 +96,14 @@ final class Relay(base: String, keys: Keys, got: (String, Json) => Unit, said: S
     said("another okay-remote with this pairing took the relay: this one stops using it (one machine, one " +
       "pairing; `--pair-again` on one of them to pair them apart)")
 
+  /** a control line to the relay itself (`ctl:`): never sealed, never passed to a phone. With no line, the newest
+   * notification is held for when there is one; other lines are of the line's own life, and dropped */
+  def plain(line: String): Unit = socket match
+    case Some(ws) =>
+      synchronized { sending = sending.handle((_, _) => ()).thenCompose(_ => ws.sendText("ctl:" + line, true)) }
+    case None => if line.startsWith("notify ") then held = Some(line)
+  private var held: Option[String] = None
+
   private def dropped(why: String): Unit =
     socket = None
     if up then said(s"the relay is lost ($why); dialling again")
@@ -104,7 +117,9 @@ final class Relay(base: String, keys: Keys, got: (String, Json) => Unit, said: S
       buf.append(data)
       if last then
         val frame = buf.toString; buf.clear()
-        if frame != "pong" && frame.length < 3000000 then
+        // the relay's own lines (Telegram's binding), plain: never a phone's
+        if frame.startsWith("ctl:") then JvmOs.loop.execute(() => control(frame.drop(4)))
+        else if frame != "pong" && frame.length < 3000000 then
           keys.open(frame).foreach(text => JvmOs.loop.execute(() =>
             Envelope.open(text, "phone", System.currentTimeMillis(), seen).foreach((kind, j) => got(kind, j))))
       ws.request(1)

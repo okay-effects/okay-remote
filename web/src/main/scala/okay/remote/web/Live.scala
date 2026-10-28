@@ -20,6 +20,10 @@ enum Live[X]:
   case Address() extends Live[String]
   /** this page's pairing given up: the secret forgotten here */
   case Unpair() extends Live[Unit]
+  /** the pairing link this page was paired by (to pair another app, the Telegram one): copied, never sent */
+  case CopyPairing() extends Live[Boolean]
+  /** a pairing link pasted: kept, and the page opened again on it */
+  case Pair(link: String) extends Live[Boolean]
 
 /** HOW THE DAEMON IS REACHED: its events into `put`, an act answered */
 trait Transport:
@@ -27,6 +31,7 @@ trait Transport:
   def act(body: Json)(done: Either[String, Json] => Unit): Unit
   def address: String = ""
   def forget(): Unit = ()
+  def pairing: Option[String] = None
 
 /** ON THE MACHINE: Server-Sent Events in, POST out — the token kept in this browser */
 final class OverHttp(token: String) extends Transport:
@@ -149,6 +154,8 @@ final class OverRelay(secret: Uint8Array) extends Transport:
       send("act", "id" -> id, "body" -> body)
       val _ = js.timers.setTimeout(90000)(asked.remove(Json.print(id)).foreach(_(Left("no answer in time"))))
 
+  override def pairing: Option[String] =
+    Option(dom.window.localStorage.getItem(Live.RelayKey)).map(s => s"${dom.window.location.origin}/#s=$s")
   override def forget(): Unit =
     dom.window.localStorage.removeItem(Live.RelayKey)
     ws.foreach(_.close())
@@ -160,7 +167,7 @@ object Unpaired extends Transport:
   def act(body: Json)(done: Either[String, Json] => Unit): Unit = done(Left("not paired"))
 
 object Live:
-  val names: List[String] = List("hello", "step", "session", "waiting", "policy", "forgot")
+  val names: List[String] = List("hello", "step", "session", "waiting", "policy", "forgot", "telegram")
   val TokenKey = "okay-remote.token"
   val RelayKey = "okay-remote.relay"
 
@@ -179,6 +186,18 @@ object Live:
             })
           case Live.Address() => k(transport.address)
           case Live.Unpair() => transport.forget(); k(())
+          case Live.CopyPairing() => transport.pairing match
+              case None => k(false)
+              case Some(link) =>
+                val _ = dom.window.navigator.asInstanceOf[js.Dynamic].clipboard.writeText(link)
+                k(true)
+          case Live.Pair(link) =>
+            val secret = "#s=([A-Za-z0-9_-]{43})".r.findFirstMatchIn(link).map(_.group(1))
+            secret.foreach { s =>
+              dom.window.localStorage.setItem(RelayKey, s)
+              dom.window.location.replace(dom.window.location.pathname)
+            }
+            k(secret.nonEmpty)
           case Live.Act(body) =>
             val answered = Promise[Either[String, Json]]()
             transport.act(body)(r => { val _ = answered.trySuccess(r) })

@@ -122,6 +122,14 @@ final class Daemon(args: List[String]):
   private val pages = mutable.Buffer.empty[Stream]
   given scala.concurrent.ExecutionContext = JvmOs.ec
   private def tell(event: String, data: Json): Unit =
+    // Telegram told only that something waits or ended, and where — never what
+    (event, J.str(data, "session")) match
+      case ("waiting", Some(id)) => notify(id, "waiting")
+      case ("step", Some(id)) => J.get(data, "step").flatMap(J.str(_, "k")) match
+          case Some("ended") => notify(id, "done")
+          case Some("stopped") => notify(id, "stopped")
+          case _ => ()
+      case _ => ()
     val text = s"event: $event\ndata: ${Json.print(data)}\n\n"
     pages.toList.foreach(_.write(text))
     relay.foreach(_.send("event", "name" -> Json.Str(event), "data" -> data))
@@ -142,11 +150,53 @@ final class Daemon(args: List[String]):
     else kept.flatMap(J.str(_, "secret")).flatMap(Keys.of)).getOrElse(Keys.fresh())
   private var relay: Option[Relay] = None
 
+  // ---- TELEGRAM (specs/remote.md): the bot's name (the relay's, if it has one), the bound chat and its signature
+  private var bot = ""
+  private var chat: Option[(String, String)] =
+    for k <- kept; c <- J.str(k, "chat"); s <- J.str(k, "sig") if c.nonEmpty yield (c, s)
+  private def keepRelay(): Unit =
+    OnJvm.write(relayFile, Json.print(Json.Obj(Vector("on" -> Json.Bool(relayOn), "url" -> Json.Str(relayUrl),
+      "secret" -> Json.Str(keys.text)) ++ chat.toVector.flatMap((c, s) => Vector("chat" -> Json.Str(c),
+      "sig" -> Json.Str(s))))))
+  private def fromRelay(line: String): Unit =
+    val parts = line.split(' ').toList
+    parts match
+      case List("bound", c, s) => chat = Some((c, s)); keepRelay(); tell("telegram", telegram)
+        JvmOs.err("okay-remote: Telegram linked\n")
+      case List("unbound") => chat = None; keepRelay(); tell("telegram", telegram)
+      case _ => ()
+  private def telegram: Json = Json.obj("bot" -> Json.Str(bot), "linked" -> Json.Bool(chat.nonEmpty))
+  /** the last time each session was told of, by kind: one message a minute at most */
+  private val toldAt = mutable.Map.empty[(String, String), Long]
+  private def notify(session: String, kind: String): Unit = if chat.nonEmpty then
+    val now = OnJvm.now
+    if toldAt.get((session, kind)).forall(now - _ > 60000) then
+      toldAt((session, kind)) = now
+      val project = remote.about(session).map(_._1.split('/').last).getOrElse("a project")
+      val text = kind match
+        case "waiting" => s"okay-remote · $project: a call waits for you"
+        case "done" => s"okay-remote · $project: the agent is done"
+        case _ => s"okay-remote · $project: the agent stopped"
+      relay.foreach(_.plain("notify " + Json.print(Json.obj("text" -> Json.Str(text)))))
+
+  /** the daemon's own acts (Telegram), else the remote's */
+  private def act(body: Json)(answer: Either[String, Json] => Unit): Unit = J.str(body, "type") match
+    case Some("telegram-link") =>
+      if bot.isEmpty || relay.isEmpty then answer(Left("no Telegram bot at this relay"))
+      else
+        val code = OnJvm.randomHex(12)
+        relay.foreach(_.plain(s"link $code"))
+        answer(Right(Json.obj("url" -> Json.Str(s"https://t.me/$bot?start=$code"))))
+    case Some("telegram-unlink") =>
+      chat = None; keepRelay(); relay.foreach(_.plain("unchat")); tell("telegram", telegram)
+      answer(Right(Json.Obj.empty))
+    case _ => remote.act(body)(answer)
+
   private def phones(kind: String, j: Json): Unit = kind match
-    case "hello" => relay.foreach(_.send("event", "name" -> Json.Str("hello"), "data" -> remote.snapshot))
+    case "hello" => relay.foreach(_.send("event", "name" -> Json.Str("hello"), "data" -> hello(false)))
     case "act" =>
       val id = J.get(j, "id").getOrElse(Json.Null)
-      remote.act(J.get(j, "body").getOrElse(Json.Null)) { r =>
+      act(J.get(j, "body").getOrElse(Json.Null)) { r =>
         relay.foreach(_.send("answer", "id" -> id, "ok" -> Json.Bool(r.isRight),
           "body" -> r.fold(e => Json.obj("error" -> Json.Str(e)), identity)))
       }
@@ -154,13 +204,15 @@ final class Daemon(args: List[String]):
 
   def start(): Unit =
     jail = OnJvm.jail(remote.base)
-    OnJvm.write(relayFile, Json.print(Json.obj("on" -> Json.Bool(relayOn), "url" -> Json.Str(relayUrl),
-      "secret" -> Json.Str(keys.text))))
+    if args.contains("--pair-again") then chat = None
+    keepRelay()
     remote.start()
     if relayOn then
-      val r = Relay(relayUrl, keys, phones, said => JvmOs.err(s"okay-remote: $said\n"))
+      val r = Relay(relayUrl, keys, phones, said => JvmOs.err(s"okay-remote: $said\n"), fromRelay,
+        () => chat.foreach((c, s) => relay.foreach(_.plain(s"chat $c $s"))))
       relay = Some(r)
       r.start()
+      Daemon.botOf(relayUrl) { name => bot = name; tell("telegram", telegram) }
     JvmOs.err(s"okay-remote: the sandbox: ${if jail.rozum then "rozum" else "none (rozum is not installed)"}" +
       s"; Claude ${if jail.claudeJailed then "in it" else "outside it (no ~/.okay-remote/claude-token)"}\n")
     JvmOs.serve(if lan then "0.0.0.0" else "127.0.0.1", port)(serve) { p =>
@@ -178,7 +230,8 @@ final class Daemon(args: List[String]):
     case o: Json.Obj => Json.Obj(o.fields ++ Vector(
         "addresses" -> Json.Arr((if lan then JvmOs.lanAddresses else Nil).map(Json.Str(_)).toVector),
         // the pairing's link (its secret in the fragment) only to a page on this very machine
-        "pair" -> Json.Str(if local && relayOn then s"${relayUrl.stripSuffix("/")}/#s=${keys.text}" else "")))
+        "pair" -> Json.Str(if local && relayOn then s"${relayUrl.stripSuffix("/")}/#s=${keys.text}" else ""),
+        "telegram" -> telegram))
     case other => other
 
   private val json = List("Content-Type" -> "application/json", "Cache-Control" -> "no-store")
@@ -223,11 +276,21 @@ final class Daemon(args: List[String]):
       if !sameOrigin(r) then error(w, 403, "not from this page")
       else Descent.parse(r.body) match
         case Left(_) => error(w, 400, "not JSON")
-        case Right(body) => remote.act(body)(_.fold(error(w, 400, _), answer(w, 200, _)))
+        case Right(body) => act(body)(_.fold(error(w, 400, _), answer(w, 200, _)))
     else error(w, 404, "no such place")
 
 object Daemon:
   val hosted = "https://okay-remote.okay-effects.workers.dev"
+
+  /** the relay's bot, if it has one (`/tg/info`): its name to `got`, on the loop */
+  def botOf(relay: String)(got: String => Unit): Unit =
+    val req = java.net.http.HttpRequest.newBuilder(java.net.URI.create(relay.stripSuffix("/") + "/tg/info"))
+      .timeout(java.time.Duration.ofSeconds(20)).build()
+    java.net.http.HttpClient.newHttpClient().sendAsync(req, java.net.http.HttpResponse.BodyHandlers.ofString())
+      .thenAccept { r =>
+        if r.statusCode == 200 then okay.effects.json.Descent.parse(r.body).toOption.flatMap(J.str(_, "bot"))
+          .filter(_.matches("[A-Za-z0-9_]{5,64}")).foreach(name => JvmOs.loop.execute(() => got(name)))
+      }
 
   /** `okay-remote verify`: every session's record checked, its chain unbroken or where it breaks */
   def verify(): Unit =

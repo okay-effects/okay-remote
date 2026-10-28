@@ -103,6 +103,9 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
   private var judge: Either[String, Judge] = Left("not read yet")
   val askFor: Int = 10 * 60 * 1000
 
+  /** a session's project and model, by its id (what a notification may say of it) */
+  def about(id: String): Option[(String, String)] = sessions.get(id).map(x => (x.project, x.model))
+
   def policy: String = m.read(file("policy.policy")).getOrElse(Defaults.policy)
 
   def start(): Unit =
