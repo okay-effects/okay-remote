@@ -21,7 +21,8 @@ object Page:
     models: List[(String, String)] = Nil, through: Map[String, String] = Map.empty, policy: String = "",
     policyError: String = "",
     addresses: List[String] = Nil, pair: String = "", rozum: Boolean = false, claudeJailed: Boolean = false,
-    bot: String = "", linked: Boolean = false)
+    bot: String = "", linked: Boolean = false, tgSent: Boolean = false, tgProblem: String = "",
+    tgSuggest: String = "")
 
   final case class State(info: Info = Info(), place: String = "sessions", open: Option[String] = None,
     steps: Map[String, Vector[Step]] = Map.empty, waiting: Vector[Json] = Vector.empty, live: Option[Boolean] = None,
@@ -48,6 +49,8 @@ object Page:
     case Changes
     case Unpair
     case TelegramLink
+    case TelegramVerify(chat: String)
+    case TelegramConfirm(code: String)
     case TelegramUnlink
     case CopyPairing
     case Pair(link: String)
@@ -104,6 +107,8 @@ object Page:
         case Left(e) => st.copy(problem = Some(e))
         case Right(j) => st.copy(tgLink = J.str(j, "url")))))
     case Msg.TelegramUnlink => (s.copy(tgLink = None), List(act("telegram-unlink")(failed)))
+    case Msg.TelegramVerify(c) => (s.copy(problem = None), List(act("telegram-verify", "chat" -> Json.Str(c))(failed)))
+    case Msg.TelegramConfirm(c) => (s.copy(problem = None), List(act("telegram-confirm", "code" -> Json.Str(c))(failed)))
     case Msg.Tick => (s, Nil)
     case Msg.Fold(k) => (s.copy(unfolded = if s.unfolded(k) then s.unfolded - k else s.unfolded + k), Nil)
     case Msg.Open(id) => (s.copy(place = "session", open = Some(id), problem = None, note = None),
@@ -138,7 +143,9 @@ object Page:
     case ("live", Json.Bool(b)) => s.copy(live = Some(b))
     case ("unpaired", _) => s.copy(unpaired = true)
     case ("telegram", j) =>
-      s.copy(info = s.info.copy(bot = J.str(j, "bot").getOrElse(""), linked = J.bool(j, "linked")),
+      s.copy(info = s.info.copy(bot = J.str(j, "bot").getOrElse(""), linked = J.bool(j, "linked"),
+        tgSent = J.bool(j, "sent"), tgProblem = J.str(j, "problem").getOrElse(""),
+        tgSuggest = J.str(j, "suggest").getOrElse("")),
         tgLink = if J.bool(j, "linked") then None else s.tgLink)
     case ("hello", j) => s.copy(live = Some(true), info = Info(
         J.arr(j, "projects").toList.collect { case Json.Str(p) => p },
@@ -148,7 +155,9 @@ object Page:
         J.str(j, "policy").getOrElse(""), J.str(j, "policyError").getOrElse(""),
         J.arr(j, "addresses").toList.collect { case Json.Str(a) => a }, J.str(j, "pair").getOrElse(""),
         J.get(j, "jail").exists(J.bool(_, "rozum")), J.get(j, "jail").exists(J.bool(_, "claude")),
-        J.get(j, "telegram").flatMap(J.str(_, "bot")).getOrElse(""), J.get(j, "telegram").exists(J.bool(_, "linked"))))
+        J.get(j, "telegram").flatMap(J.str(_, "bot")).getOrElse(""), J.get(j, "telegram").exists(J.bool(_, "linked")),
+        J.get(j, "telegram").exists(J.bool(_, "sent")), J.get(j, "telegram").flatMap(J.str(_, "problem")).getOrElse(""),
+        J.get(j, "telegram").flatMap(J.str(_, "suggest")).getOrElse("")))
     case ("session", j) => Session.fromJson(j).fold(s)(upsert(s, _))
     case ("step", j) =>
       (J.str(j, "session"), J.get(j, "step").flatMap(Step.fromJson)) match
@@ -345,12 +354,18 @@ object Page:
     else if s.info.linked then (List(Part.block("telegram")(Part.text("Telegram: linked — @" + s.info.bot +
       " tells you when a call waits and when an agent is done (only that, never what)."), Part.slot("tg"))),
       List(Button("Unlink Telegram", Style.Danger)(Msg.TelegramUnlink: Msg).at("tg")))
-    else s.tgLink match
-      case Some(link) => (List(Part.block("telegram")(Part.text("Open this link on your phone (or scan it), then " +
-          "Start: @" + s.info.bot + " will tell you when a call waits. It works once, for ten minutes."),
-          Part.block("qr")(Part.qr(link, "link Telegram")), Part.block("address")(Part.link(link, link)))), Nil)
-      case None => (List(Part.block("telegram")(Part.text("Telegram: be told when a call waits, with the page " +
-          "closed."), Part.slot("tg"))), List(Button("Link Telegram")(Msg.TelegramLink: Msg).at("tg")))
+    else
+      val problem = if s.info.tgProblem.nonEmpty then List(Part.problem(s.info.tgProblem)) else Nil
+      if s.info.tgSent then
+        val form = Form.one(Field.text("The code @" + s.info.bot + " sent you"))
+        val parts = (Part.text("Telegram: type the code the bot just sent to your chat.") :: problem) :+ form
+        (List(Part.block("telegram")(parts*)), List(Button.submit("Link", form)(Msg.TelegramConfirm(_): Msg)))
+      else
+        val form = Form.one(Field.text("Your Telegram chat id").initially(s.info.tgSuggest))
+        val parts = (Part.text("Telegram: be told when a call waits, with the page closed — by @" + s.info.bot +
+          ". It sends a code to your chat; type it here.") :: problem) :+ form
+        (List(Part.block("telegram")(parts*)),
+          List(Button.submit("Send me a code", form)(Msg.TelegramVerify(_): Msg)))
 
   def phone(s: State): (List[Part], List[Button[Msg]]) =
     val token = s.address.split("\\?t=").drop(1).headOption.getOrElse("")

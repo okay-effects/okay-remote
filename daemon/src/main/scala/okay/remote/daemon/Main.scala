@@ -191,6 +191,10 @@ final class Daemon(args: List[String]):
       "sig" -> Json.Str(s))))))
   /** the linking code the relay gave (one at a time, ten minutes), and the act that waits for it */
   private var code: Option[(String, Long)] = None
+  /** the chat a code was sent to: the one a typed code may bind */
+  private var verifying: Option[String] = None
+  /** what the page is told of a link not made: a code not sent, a code not right */
+  private var tgProblem = ""
   private var linking: Option[Either[String, Json] => Unit] = None
   private def fromRelay(line: String): Unit =
     line.split(' ').toList match
@@ -200,6 +204,14 @@ final class Daemon(args: List[String]):
         linking = None
       // a chat bound by the relay: taken once, by the code this daemon asked for — then the relay dialled again
       // with it (the room learns the chat from the request), and the chat told
+      case List("bound", c, s, "code") if verifying.contains(c) =>
+        verifying = None; chat = Some((c, s)); tgProblem = ""; keepRelay(); tell("telegram", telegram)
+        JvmOs.err("okay-remote: Telegram linked\n")
+        relay.foreach { r => r.plain(s"linked $c $s"); r.redial() }
+      case List("nochat") =>
+        verifying = None; tgProblem = "The bot could not write to that chat: start a chat with it first."
+        tell("telegram", telegram)
+      case List("wrongcode") => tgProblem = "That code is not right, or has expired."; tell("telegram", telegram)
       case List("bound", c, s, k) =>
         if code.exists((x, at) => x == k && JvmOs.now - at < 600000) then
           code = None; chat = Some((c, s)); keepRelay(); tell("telegram", telegram)
@@ -208,7 +220,12 @@ final class Daemon(args: List[String]):
         else relay.foreach(_.plain(s"refused $c $s"))
       case List("unbound") => chat = None; keepRelay(); tell("telegram", telegram); relay.foreach(_.redial())
       case _ => ()
-  private def telegram: Json = Json.obj("bot" -> Json.Str(bot), "linked" -> Json.Bool(chat.nonEmpty))
+  /** what the page is told of Telegram: the bot, linked or not, a code sent, why not — and the chat this machine's
+   * rozum talks to, as the one to offer */
+  private def telegram: Json = Json.obj("bot" -> Json.Str(bot), "linked" -> Json.Bool(chat.nonEmpty),
+    "sent" -> Json.Bool(verifying.nonEmpty), "problem" -> Json.Str(tgProblem),
+    "suggest" -> Json.Str(JvmOs.read(s"${JvmOs.userHome}/.rozum/secrets/telegram-chat-id").map(_.trim)
+      .filter(_.matches("-?[0-9]{1,20}")).getOrElse("")))
   /** the last time each session was told of, by kind: one message a minute at most */
   private val toldAt = mutable.Map.empty[(String, String), Long]
   private def notify(session: String, kind: String): Unit = if chat.nonEmpty then
@@ -229,6 +246,18 @@ final class Daemon(args: List[String]):
       else
         linking = Some(answer)
         relay.foreach(_.plain("link"))
+    case Some("telegram-verify") =>
+      val c = J.str(body, "chat").map(_.trim).getOrElse("")
+      if relay.isEmpty || bot.isEmpty then answer(Left("no Telegram bot at this relay"))
+      else if !c.matches("-?[0-9]{1,20}") then answer(Left("a chat id is a number"))
+      else
+        verifying = Some(c); tgProblem = ""; relay.foreach(_.plain(s"verify $c")); tell("telegram", telegram)
+        answer(Right(Json.Obj.empty))
+    case Some("telegram-confirm") =>
+      val typed = J.str(body, "code").map(_.trim).getOrElse("")
+      verifying match
+        case None => answer(Left("ask for a code first"))
+        case Some(c) => relay.foreach(_.plain(s"confirm $c $typed")); answer(Right(Json.Obj.empty))
     case Some("telegram-unlink") =>
       chat = None; keepRelay(); relay.foreach(_.redial()); tell("telegram", telegram)
       answer(Right(Json.Obj.empty))

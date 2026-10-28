@@ -35,22 +35,28 @@ const start = (code, chat = 4242) => hook({ update_id: 1, message: { chat: { id:
     await b.sleep(4000);
     const token = fs.readFileSync(`${home}/.okay-remote/token`, "utf8").trim();
     await b.go(`http://127.0.0.1:7797/?t=${token}`);
-    await b.click("Phone"); await b.sleep(500);
-    check("the page offers Telegram", await b.click("Link Telegram"));
-    await b.sleep(800);
-    const link = await b.js("[...document.querySelectorAll('a')].map(a=>a.href).find(h=>h.includes('t.me/'))");
-    check("a link for the bot", /^https:\/\/t\.me\/okay_remote_test_bot\?start=[A-Za-z0-9_-]{60,64}$/.test(link || ""));
-    await b.shot("/tmp/or-tg-link.png");
-    const code = (link || "").split("start=")[1];
+    await b.click("Phone"); await b.sleep(800);
+    const field = (v) => b.js(`(()=>{const f=[...document.querySelectorAll('input')].pop(); f.value=${JSON.stringify(v)};
+      f.dispatchEvent(new Event('input',{bubbles:true})); return true})()`);
+    check("the page offers Telegram by a code", (await b.text()).includes("Send me a code"));
     check("Telegram without its secret: refused", (await hook({ message: {} }, "wrong")).status === 403);
-    await start(code); await b.sleep(1500);
+    // a chat the bot cannot write to: said so
+    await field("666"); await b.click("Send me a code"); await b.sleep(1500);
+    check("a chat the bot cannot write to: said so", (await b.text()).includes("could not write to that chat"));
+    // the person's chat: a code sent to it, a wrong one refused, the right one links
+    await field("4242"); await b.click("Send me a code"); await b.sleep(1500);
+    const sentCode = sent.filter(m => m.chat_id === "4242").map(m => (m.text.match(/code is (\d{6})/) || [])[1])
+      .filter(Boolean).pop();
+    check("a code sent to the chat", /^\d{6}$/.test(sentCode || ""));
+    await field("000000" === sentCode ? "111111" : "000000"); await b.click("Link"); await b.sleep(1200);
+    check("a wrong code: refused", (await b.text()).includes("not right"));
+    await field(sentCode); await b.click("Link"); await b.sleep(2000);
     check("linked: the chat told so", sent.some(m => m.chat_id === "4242" && /^Linked/.test(m.text)));
     const kept = JSON.parse(fs.readFileSync(`${home}/.okay-remote/relay.json`, "utf8"));
     check("the daemon keeps the chat and the relay's signature",
       kept.chat === "4242" && /^[0-9a-f]{64}$/.test(kept.sig));
     check("the page says linked", (await b.text()).includes("Telegram: linked"));
-    await start(code, 5555); await b.sleep(1000);
-    check("a code taken twice: refused", sent.some(m => m.chat_id === "5555" && /used already|not valid/.test(m.text)));
+    await b.shot("/tmp/or-tg-linked.png");
     // a task that waits for you: the chat told, with no command in it
     await b.click("New"); await b.sleep(400);
     await b.js(`(()=>{const m=[...document.querySelectorAll('select')][1];
@@ -71,7 +77,7 @@ const start = (code, chat = 4242) => hook({ update_id: 1, message: { chat: { id:
       ended = (await b.text()).includes("Done ·");
     }
     await b.sleep(1500);
-    const told = sent.filter(m => m.chat_id === "4242").map(m => m.text);
+    const told = sent.filter(m => m.chat_id === "4242" && !/code is/.test(m.text)).map(m => m.text);
     console.log("  told:", JSON.stringify(told));
     check("told when a call waits", waited && told.includes("okay-remote · demo: a call waits for you"));
     check("told when the agent is done", told.includes("okay-remote · demo: the agent is done"));

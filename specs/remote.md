@@ -117,6 +117,11 @@ The phone is told — with the page closed — when a call waits for a decision,
 bot of the relay. What is told is only that, and the project's name: never a command, a path, a word of the agent.
 The decisions stay in the page (in the browser, or the same page as the bot's Mini App), sealed end to end.
 
+- **Linking by a code** (the way the page offers; no message to the bot needed, so a bot something else reads by
+  polling — rozum's — stays so): the person gives their chat id (the page offers the one this machine's rozum talks
+  to); the daemon asks the room (`ctl:verify <chat>`); the bot sends that chat a six-digit code — an HMAC of the room,
+  the chat and the ten minutes, by the relay's secret, nothing kept; typed on the page (`ctl:confirm <chat> <code>`),
+  it binds the chat (`ctl:bound <chat> <sig> code`, then as below). A chat the bot cannot write to is said so.
 - **Linking a chat**: on the machine's page, Phone → Telegram → a link `t.me/<bot>?start=<code>`. The daemon asks
   its room (`ctl:link`, a plain control line only the host may send, never passed to the phones); the room answers
   `ctl:code <code>`, a token signed by the relay (okay-serverless's `Tokens`: the room, ten minutes). Telegram's

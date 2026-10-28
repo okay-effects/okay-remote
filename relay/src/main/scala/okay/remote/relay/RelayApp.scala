@@ -46,6 +46,12 @@ object RelayApp:
   private def told[R[_], A](b: Bot)(p: A ! (R + Telegram))(using In[Fetch, R]): A ! R =
     Telegram.viaBotApi[R + Telegram, R, A](b.token, b.api)(p)
 
+  /** a code for a chat, for ten minutes: what the bot sends to the chat and the person types on the page — proof the
+   * chat is theirs, with no message to the bot and nothing kept (`window` the ten minutes it belongs to) */
+  def code(b: Bot, room: String, chat: String, window: Long): String =
+    val mac = Hashes.hmac(Hashes.utf8(b.secret), Hashes.utf8(s"code:$room:$chat:$window"))
+    f"${(BigInt(1, mac.take(6)) % 1000000).toInt}%06d"
+
   /** a chat's signature: the relay's HMAC of the room and the chat — what a daemon gives back to be told again */
   def sign(b: Bot, room: String, chat: String): String =
     Hashes.hex(Hashes.hmac(Hashes.utf8(b.secret), Hashes.utf8(s"$room:$chat")))
@@ -76,6 +82,25 @@ object RelayApp:
               case Some(chat) => told[InActor, Boolean](b)(Telegram.send[InActor + Telegram](chat, text,
                   b.origin.map(_ + "/"))).flatMap(ok =>
                   if ok then pure(()) else Sockets.send[InActor](host, "ctl:unbound"))
+          // LINKING BY A CODE (no message to the bot needed: a bot that is read by polling elsewhere stays so): a code
+          // sent to the chat; typed on the page, it binds the chat
+          case "verify" =>
+            val chat = rest.trim
+            if !chat.matches("-?[0-9]{1,20}") then Sockets.send[InActor](host, "ctl:nochat")
+            else Clock.now[InActor].flatMap(now => told[InActor, Boolean](b)(Telegram.send[InActor + Telegram](chat,
+              s"okay-remote: your code is ${code(b, room, chat, now / 600000)} (for ten minutes). If you did not ask " +
+                "for it, ignore this.")).flatMap(ok => if ok then pure(()) else
+                Sockets.send[InActor](host, "ctl:nochat")))
+          case "confirm" =>
+            val (chat, typed) = rest.trim.span(_ != ' ')
+            Clock.now[InActor].flatMap { now =>
+              val window = now / 600000
+              val right = chat.matches("-?[0-9]{1,20}") &&
+                (Hashes.same(typed.trim, code(b, room, chat, window)) ||
+                  Hashes.same(typed.trim, code(b, room, chat, window - 1)))
+              if !right then Sockets.send[InActor](host, "ctl:wrongcode")
+              else Sockets.send[InActor](host, s"ctl:bound $chat ${sign(b, room, chat)} code")
+            }
           // the daemon's word on a bound chat (its own one-time code checked): told so — only a chat of this room,
           // by the relay's signature
           case "linked" | "refused" =>
