@@ -14,11 +14,15 @@ class_name = "Room"
 tag = "v1"
 new_sqlite_classes = ["Room"]
 
-[[durable_objects.bindings]]
-name = "LINKS"
-class_name = "Link"
+# the button that opens the page in Telegram (https only)
+[vars]
+ORIGIN = "https://okay-remote.okay-effects.workers.dev"
 
-# a linking code for Telegram: memory only, ten minutes, taken once
+# the linking codes are signed tokens now: no object keeps them
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["Link"]
+
+[[migrations]]
+tag = "v3"
+deleted_classes = ["Link"]

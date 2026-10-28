@@ -5,6 +5,7 @@ import okay.guard.jvm.JvmOs
 import okay.guard.local.{Stream, Web, WebRequest}
 import okay.guard.local.JournalFiles
 import okay.remote.{Agent, Audit, J, Jail, Judge, Machine, Remote, Secret}
+import okay.serverless.relay.{Pairing, RelayClient, Sealer}
 import java.nio.charset.StandardCharsets.UTF_8
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
@@ -147,9 +148,10 @@ final class Daemon(args: List[String]):
     .orElse(kept.flatMap(J.str(_, "url"))).getOrElse(Daemon.hosted)
   private val relayOn: Boolean = !args.contains("--no-relay") && (args.contains("--relay") ||
     kept.exists(J.bool(_, "on")))
-  private val keys: Keys = (if args.contains("--pair-again") then None
-    else kept.flatMap(J.str(_, "secret")).flatMap(Keys.of)).getOrElse(Keys.fresh())
-  private var relay: Option[Relay] = None
+  /** the pairing (okay-serverless's sealed rooms), under okay-remote's label: the phones' secret */
+  private val keys: Pairing = (if args.contains("--pair-again") then None
+    else kept.flatMap(J.str(_, "secret")).flatMap(Pairing.of(_, Daemon.label))).getOrElse(Sealer.fresh(Daemon.label))
+  private var relay: Option[RelayClient] = None
 
   // ---- TELEGRAM (specs/remote.md): the bot's name (the relay's, if it has one), the bound chat and its signature
   private var bot = ""
@@ -159,12 +161,24 @@ final class Daemon(args: List[String]):
     OnJvm.write(relayFile, Json.print(Json.Obj(Vector("on" -> Json.Bool(relayOn), "url" -> Json.Str(relayUrl),
       "secret" -> Json.Str(keys.text)) ++ chat.toVector.flatMap((c, s) => Vector("chat" -> Json.Str(c),
       "sig" -> Json.Str(s))))))
+  /** the linking code the relay gave (one at a time, ten minutes), and the act that waits for it */
+  private var code: Option[(String, Long)] = None
+  private var linking: Option[Either[String, Json] => Unit] = None
   private def fromRelay(line: String): Unit =
-    val parts = line.split(' ').toList
-    parts match
-      case List("bound", c, s) => chat = Some((c, s)); keepRelay(); tell("telegram", telegram)
-        JvmOs.err("okay-remote: Telegram linked\n")
-      case List("unbound") => chat = None; keepRelay(); tell("telegram", telegram)
+    line.split(' ').toList match
+      case List("code", c) =>
+        code = Some((c, OnJvm.now))
+        linking.foreach(_(Right(Json.obj("url" -> Json.Str(s"https://t.me/$bot?start=$c")))))
+        linking = None
+      // a chat bound by the relay: taken once, by the code this daemon asked for — then the relay dialled again
+      // with it (the room learns the chat from the request), and the chat told
+      case List("bound", c, s, k) =>
+        if code.exists((x, at) => x == k && OnJvm.now - at < 600000) then
+          code = None; chat = Some((c, s)); keepRelay(); tell("telegram", telegram)
+          JvmOs.err("okay-remote: Telegram linked\n")
+          relay.foreach { r => r.plain(s"linked $c $s"); r.redial() }
+        else relay.foreach(_.plain(s"refused $c $s"))
+      case List("unbound") => chat = None; keepRelay(); tell("telegram", telegram); relay.foreach(_.redial())
       case _ => ()
   private def telegram: Json = Json.obj("bot" -> Json.Str(bot), "linked" -> Json.Bool(chat.nonEmpty))
   /** the last time each session was told of, by kind: one message a minute at most */
@@ -178,18 +192,17 @@ final class Daemon(args: List[String]):
         case "waiting" => s"okay-remote · $project: a call waits for you"
         case "done" => s"okay-remote · $project: the agent is done"
         case _ => s"okay-remote · $project: the agent stopped"
-      relay.foreach(_.plain("notify " + Json.print(Json.obj("text" -> Json.Str(text)))))
+      relay.foreach(_.plain("notify " + Json.print(Json.obj("text" -> Json.Str(text))), hold = true))
 
   /** the daemon's own acts (Telegram), else the remote's */
   private def act(body: Json)(answer: Either[String, Json] => Unit): Unit = J.str(body, "type") match
     case Some("telegram-link") =>
       if bot.isEmpty || relay.isEmpty then answer(Left("no Telegram bot at this relay"))
       else
-        val code = OnJvm.randomHex(12)
-        relay.foreach(_.plain(s"link $code"))
-        answer(Right(Json.obj("url" -> Json.Str(s"https://t.me/$bot?start=$code"))))
+        linking = Some(answer)
+        relay.foreach(_.plain("link"))
     case Some("telegram-unlink") =>
-      chat = None; keepRelay(); relay.foreach(_.plain("unchat")); tell("telegram", telegram)
+      chat = None; keepRelay(); relay.foreach(_.redial()); tell("telegram", telegram)
       answer(Right(Json.Obj.empty))
     case _ => remote.act(body)(answer)
 
@@ -209,8 +222,8 @@ final class Daemon(args: List[String]):
     keepRelay()
     remote.start()
     if relayOn then
-      val r = Relay(relayUrl, keys, phones, said => JvmOs.err(s"okay-remote: $said\n"), fromRelay,
-        () => chat.foreach((c, s) => relay.foreach(_.plain(s"chat $c $s"))))
+      val r = RelayClient(relayUrl, keys, run => JvmOs.loop.execute(run), phones, fromRelay,
+        said = s => JvmOs.err(s"okay-remote: $s\n"), query = () => chat.fold("")((c, s) => s"chat=$c&sig=$s"))
       relay = Some(r)
       r.start()
       Daemon.botOf(relayUrl) { name => bot = name; tell("telegram", telegram) }
@@ -282,6 +295,8 @@ final class Daemon(args: List[String]):
 
 object Daemon:
   val hosted = "https://okay-remote.okay-effects.workers.dev"
+  /** okay-remote's label in its pairings: what the keys are derived under (specs/relay.md of okay-serverless) */
+  val label = "okay-remote"
 
   /** the relay's bot, if it has one (`/tg/info`): its name to `got`, on the loop */
   def botOf(relay: String)(got: String => Unit): Unit =

@@ -52,9 +52,10 @@ phone (the page, from the relay) ──wss──▶ Relay (Cloudflare Worker + a
 - **Pairing**: the daemon makes a secret S (32 random bytes, `~/.okay-remote/relay.json`, 0600). Its local page
   (127.0.0.1 only) shows a QR code of `<relay>/#s=<S>`: the fragment never leaves the phone. The page keeps S in the
   browser. `--pair-again` makes a new S: every paired phone is out.
-- **Derived**: `enc = SHA-256("okay-remote/enc:" ‖ S)` the AES key; `auth = hex SHA-256("okay-remote/auth:" ‖ S)`;
-  `room = hex SHA-256(auth)`. Both ends dial `/r/<room>/{daemon|phone}?auth=<auth>`; the relay lets in only an
-  `auth` whose SHA-256 is the room (okay-guard's meeting points' way). The relay never has `enc`: it passes frames it
+- **Derived** (okay-serverless's sealed rooms, `okay-serverless-relay`, its `Pairing` under the label
+  `okay-remote`): `enc = SHA-256("okay-remote/enc:" ‖ S)` the AES key; `auth = hex SHA-256("okay-remote/auth:" ‖ S)`;
+  `room = hex SHA-256(auth)`. The daemon dials `/r/<room>/host`, a phone `/r/<room>/guest`, each `?auth=<auth>`; the
+  room (okay-serverless's `Rooms`) lets in only an `auth` whose SHA-256 is its name. The relay never has `enc`: it passes frames it
   cannot read, keeps nothing (no storage; the sockets' roles in their attachments), one daemon per room (the newest),
   any number of phones, frames at most 2 MB.
 - **A frame**: `base64url(iv ‖ AES-GCM(enc, iv, json, aad "okay-remote/1"))`; the JSON says who sent it (`from`),
@@ -115,20 +116,23 @@ The phone is told — with the page closed — when a call waits for a decision,
 bot of the relay. What is told is only that, and the project's name: never a command, a path, a word of the agent.
 The decisions stay in the page (in the browser, or the same page as the bot's Mini App), sealed end to end.
 
-- **Linking a chat**: on the machine's page, Phone → Telegram → a link `t.me/<bot>?start=<code>`, the code one-time
-  and random (10 minutes). The daemon gives the code to its room (`ctl:link`, a plain control line only a daemon may
-  send, never passed to the phones); the room names it to a `Link` object (memory, by the code). Telegram's `/start
-  <code>` comes to the relay's webhook (`/tg`, Telegram's secret header checked), which finds the room by the code
-  and binds the chat: the room tells the daemon `ctl:bound <chat> <sig>`, `sig` an HMAC of the room and the chat by
-  the relay's secret. The daemon keeps the chat and `sig` (relay.json) and gives them back at every connection
-  (`ctl:chat`), the room taking them only with a valid `sig`: the relay keeps nothing, and no daemon can bind a chat
-  that did not ask.
-- **Telling**: the daemon sends `ctl:notify {"text"}` — at most one a minute per session and kind — and the room
-  sends it to the bound chat with a button that opens the page (a Mini App). A chat that blocked the bot is unbound
-  (`ctl:unbound`). Unlink on the page forgets the chat.
+- **Linking a chat**: on the machine's page, Phone → Telegram → a link `t.me/<bot>?start=<code>`. The daemon asks
+  its room (`ctl:link`, a plain control line only the host may send, never passed to the phones); the room answers
+  `ctl:code <code>`, a token signed by the relay (okay-serverless's `Tokens`: the room, ten minutes). Telegram's
+  `/start <code>` comes to the relay's webhook (`/tg`, Telegram's secret header checked), which finds the room by the
+  token and binds the chat: the room tells the daemon `ctl:bound <chat> <sig> <code>`, `sig` an HMAC of the room and
+  the chat by the relay's secret. The daemon takes it only for the code it asked for, once (`ctl:refused` else), says
+  `ctl:linked` (the bot then tells the chat), keeps the chat and `sig` (relay.json), and dials again with them in its
+  request (`?chat=&sig=`): the room tags the host with the chat only for a valid `sig`. The relay keeps nothing, and
+  no daemon can bind a chat that did not ask.
+- **Telling**: the daemon sends `ctl:notify {"text"}` — at most one a minute per session and kind; with the line down,
+  the newest is held — and the room sends it to the bound chat (okay-serverless's `Telegram` effect, by the Bot API)
+  with a button that opens the page (a Mini App). A chat that blocked the bot is unbound (`ctl:unbound`). Unlink on
+  the page forgets the chat (the daemon dials again without it).
 - **The Mini App**: the page itself, from the relay. Paired once by pasting the pairing link (Phone → Copy the
   pairing link on a paired page): the secret goes by the clipboard, never through Telegram.
-- The relay's secrets: `TG_TOKEN` (the bot's), `TG_SECRET` (the webhook's and the signatures'); `TG_BOT` its name;
+- The relay is an okay-serverless app (`relay/`: `Front`, `Rooms` with okay-remote's `Steward`), a Worker on
+  Cloudflare. Its secrets: `TG_TOKEN` (the bot's), `TG_SECRET` (the webhook's and the signatures'); `TG_BOT` its name;
   `relay/telegram-setup.sh` sets them and the webhook, the token typed, never shown. No bot: no Telegram on the page.
 
 ## Working with it

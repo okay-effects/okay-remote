@@ -2,13 +2,12 @@ package okay.remote.web
 
 import okay.business.scala3.*
 import okay.effects.json.{Descent, Json}
-import okay.remote.{Envelope, J, Pairing}
+import okay.remote.J
+import okay.serverless.relay.{Guest, Pairing}
 import okay.scala3.std.{Lift, Lifted}
 import org.scalajs.dom
 import scala.concurrent.{Future, Promise}
 import scala.scalajs.js
-import scala.scalajs.js.Dynamic.{global => g}
-import scala.scalajs.js.typedarray.{ArrayBuffer, Uint8Array}
 
 /** WHAT THE PAGE ASKS OF ITS DAEMON, as an effect: the daemon's events (in batches, none lost between screens), an act
  * and its answer, the clock. How the daemon is reached — on the machine, or through the relay — is the handler's */
@@ -56,110 +55,43 @@ final class OverHttp(token: String) extends Transport:
       (e: Any) => done(Left(s"the daemon is not reached: $e")))
 
 /**
- * THROUGH THE RELAY (specs/remote.md): a WebSocket to the room the pairing's secret names; every frame sealed and
- * opened here by WebCrypto (AES-256-GCM, a key derived from the secret, never sent); a frame not from the daemon,
- * out of time or seen before, dropped. The relay's plain words: `online` / `offline` — whether the daemon is there.
+ * THROUGH THE RELAY (specs/remote.md): okay-serverless's sealed room as a guest — every frame sealed and opened here
+ * (WebCrypto), a key derived from the pairing's secret, never sent. The page's acts sealed to the daemon, each answered
+ * by its id; the daemon there or not (`live`).
  */
-final class OverRelay(secret: Uint8Array) extends Transport:
-  private val subtle = g.crypto.subtle
-  private val seen = Envelope.Seen()
-  private var ws: Option[dom.WebSocket] = None
-  private var key: js.Dynamic = null
+final class OverRelay(paired: Pairing) extends Transport:
+  import scala.scalajs.concurrent.JSExecutionContext.Implicits.queue
   private var put: ((String, Json)) => Unit = _ => ()
   private var n = 0
   private val asked = scala.collection.mutable.Map.empty[String, Either[String, Json] => Unit]
-  private var backoff = 1000
+  private val guest = Guest(dom.window.location.origin, paired, got, present)
 
-  private def bytes(s: String): Uint8Array = js.Dynamic.newInstance(g.TextEncoder)().encode(s).asInstanceOf[Uint8Array]
-  private def concat(a: Uint8Array, b: Uint8Array): Uint8Array =
-    val c = new Uint8Array(a.length + b.length); c.set(a); c.set(b, a.length); c
-  private def sha(data: Uint8Array): js.Promise[ArrayBuffer] =
-    subtle.digest("SHA-256", data).asInstanceOf[js.Promise[ArrayBuffer]]
-  private def hex(b: ArrayBuffer): String = new Uint8Array(b).toArray.map(x => f"${x.toInt & 255}%02x").mkString
-  private def nonce: String =
-    val b = new Uint8Array(12); g.crypto.getRandomValues(b); b.toArray.map(x => f"${x.toInt & 255}%02x").mkString
+  private def got(kind: String, j: Json): Unit = kind match
+    case "event" => put(J.str(j, "name").getOrElse("") -> J.get(j, "data").getOrElse(Json.Null))
+    case "answer" => J.get(j, "id").map(x => Json.print(x)).flatMap(asked.remove).foreach(done =>
+        if J.bool(j, "ok") then done(Right(J.get(j, "body").getOrElse(Json.Obj.empty)))
+        else done(Left(J.get(j, "body").flatMap(J.str(_, "error")).getOrElse("refused"))))
+    case _ => ()
+  private def present(up: Boolean): Unit =
+    put("live" -> Json.Bool(up))
+    if up then guest.send("hello")
+    else { asked.values.foreach(_(Left("the daemon is not reached: try again"))); asked.clear() }
 
-  def start(put: ((String, Json)) => Unit): Unit =
-    this.put = put
-    import scala.scalajs.concurrent.JSExecutionContext.Implicits.queue
-    for
-      enc <- sha(concat(bytes(Pairing.encLabel), secret)).toFuture
-      k <- subtle.importKey("raw", enc, "AES-GCM", false, js.Array("encrypt", "decrypt"))
-        .asInstanceOf[js.Promise[js.Dynamic]].toFuture
-      auth <- sha(concat(bytes(Pairing.authLabel), secret)).toFuture.map(hex)
-      room <- sha(bytes(auth)).toFuture.map(hex)
-    do
-      key = k
-      dial(room, auth)
-
-  private def dial(room: String, auth: String): Unit =
-    val scheme = if dom.window.location.protocol == "https:" then "wss" else "ws"
-    val s = new dom.WebSocket(s"$scheme://${dom.window.location.host}/r/$room/phone?auth=$auth")
-    ws = Some(s)
-    s.onopen = _ => backoff = 1000
-    s.onmessage = (e: dom.MessageEvent) => e.data match
-      case "online" => put("live" -> Json.Bool(true)); send("hello")
-      case "offline" => put("live" -> Json.Bool(false))
-      case "pong" => ()
-      case frame: String => opened(frame)
-      case _ => ()
-    s.onclose = (_: dom.CloseEvent) =>
-      if ws.contains(s) then
-        put("live" -> Json.Bool(false))
-        asked.values.foreach(_(Left("the relay was lost: try again")))
-        asked.clear()
-        val _ = js.timers.setTimeout(backoff.toDouble)(dial(room, auth))
-        backoff = math.min(backoff * 2, 30000)
-    val beat = js.timers.setInterval(30000)(if s.readyState == 1 then s.send("ping"))
-    s.addEventListener("close", (_: dom.Event) => js.timers.clearInterval(beat))
-
-  private def opened(frame: String): Unit =
-    val raw = js.Dynamic.global.atob(frame.replace('-', '+').replace('_', '/') +
-      "=" * ((4 - frame.length % 4) % 4)).asInstanceOf[String]
-    val b = new Uint8Array(raw.length)
-    raw.indices.foreach(i => b(i) = raw.charAt(i).toShort)
-    val iv = b.subarray(0, 12)
-    val params = js.Dynamic.literal(name = "AES-GCM", iv = iv, additionalData = bytes(Pairing.aad))
-    val _ = subtle.decrypt(params, key, b.subarray(12)).asInstanceOf[js.Promise[ArrayBuffer]].`then`[Unit](
-      (plain: ArrayBuffer) =>
-        val text = js.Dynamic.newInstance(g.TextDecoder)().decode(plain).asInstanceOf[String]
-        Envelope.open(text, "daemon", js.Date.now().toLong, seen).foreach {
-          case ("event", j) => put(J.str(j, "name").getOrElse("") -> J.get(j, "data").getOrElse(Json.Null))
-          case ("answer", j) => J.get(j, "id").map(x => Json.print(x)).flatMap(asked.remove).foreach(done =>
-              if J.bool(j, "ok") then done(Right(J.get(j, "body").getOrElse(Json.Obj.empty)))
-              else done(Left(J.get(j, "body").flatMap(J.str(_, "error")).getOrElse("refused"))))
-          case _ => ()
-        },
-      (_: Any) => ())
-
-  private def send(kind: String, fields: (String, Json)*): Unit = ws.filter(_.readyState == 1).foreach { s =>
-    val text = Envelope.wrap("phone", js.Date.now().toLong, nonce, kind, fields*)
-    val iv = new Uint8Array(12); g.crypto.getRandomValues(iv)
-    val params = js.Dynamic.literal(name = "AES-GCM", iv = iv, additionalData = bytes(Pairing.aad))
-    val _ = subtle.encrypt(params, key, bytes(text)).asInstanceOf[js.Promise[ArrayBuffer]].`then`[Unit] {
-      (box: ArrayBuffer) =>
-        val all = concat(iv, new Uint8Array(box))
-        val bin = all.toArray.map(x => (x.toInt & 255).toChar).mkString
-        val b64 = js.Dynamic.global.btoa(bin).asInstanceOf[String]
-        s.send(b64.replace('+', '-').replace('/', '_').reverse.dropWhile(_ == '=').reverse)
-    }
-  }
+  def start(put: ((String, Json)) => Unit): Unit = { this.put = put; guest.start() }
 
   def act(body: Json)(done: Either[String, Json] => Unit): Unit =
-    if !ws.exists(_.readyState == 1) || key == null then done(Left("the relay is not reached"))
+    if !guest.open then done(Left("the relay is not reached"))
     else
       n += 1
       val id = Json.Str(s"a$n")
       asked(Json.print(id)) = done
-      send("act", "id" -> id, "body" -> body)
+      guest.send("act", "id" -> id, "body" -> body)
       val _ = js.timers.setTimeout(90000)(asked.remove(Json.print(id)).foreach(_(Left("no answer in time"))))
 
-  override def pairing: Option[String] =
-    Option(dom.window.localStorage.getItem(Live.RelayKey)).map(s => s"${dom.window.location.origin}/#s=$s")
+  override def pairing: Option[String] = Some(s"${dom.window.location.origin}/#s=${paired.text}")
   override def forget(): Unit =
     dom.window.localStorage.removeItem(Live.RelayKey)
-    ws.foreach(_.close())
-    ws = None
+    guest.close()
 
 /** NOT PAIRED: no token here, no secret — the page says how to pair */
 object Unpaired extends Transport:

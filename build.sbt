@@ -5,12 +5,15 @@ import sbtcrossproject.CrossPlugin.autoImport.{crossProject, CrossType}
 val scala3 = "3.3.8"
 val okayGuard = "0.1.0"
 val okayUi = "0.1.0"
+val okayServerless = "0.1.0"
 
 ThisBuild / organization := "io.github.okay-effects"
 ThisBuild / version := "0.1.0-SNAPSHOT"
 ThisBuild / scalaVersion := scala3
 ThisBuild / scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Wunused:imports,privates,locals")
 ThisBuild / resolvers ++= Seq("okay-guard" at "https://okay-effects.github.io/okay-guard/maven",
+  "okay-serverless" at "https://okay-effects.github.io/okay-serverless/maven",
+  "okay-store" at "https://okay-effects.github.io/okay-store/maven",
   "okay-effects" at "https://okay-effects.github.io/okay-simple/maven",
   "okay-mcp" at "https://okay-effects.github.io/okay-mcp/maven",
   "okay-faces" at "https://okay-effects.github.io/okay-faces/maven",
@@ -35,12 +38,14 @@ lazy val web = (project in file("web")).enablePlugins(ScalaJSPlugin).dependsOn(c
       Seq(org.scalajs.linker.interface.ModuleInitializer.mainMethodWithArgs("okay.remote.web.Main", "main")
         .withModuleID("page")),
     scalaJSLinkerConfig ~= (_.withModuleKind(ModuleKind.ESModule)),
-    libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-ui" % okayUi, munit.value))
+    libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-ui" % okayUi,
+      "io.github.okay-effects" %%% "okay-serverless-relay" % okayServerless, munit.value))
 
 /** THE DAEMON ON THE MACHINE: over okay-guard's `Os` on the JVM — the agent's processes, the page's server */
 lazy val daemon = (project in file("daemon")).dependsOn(core.jvm)
   .settings(name := "okay-remote-daemon", Compile / mainClass := Some("okay.remote.daemon.Main"),
-    libraryDependencies ++= Seq("io.github.okay-effects" %% "okay-guard-jvm" % okayGuard, munit.value),
+    libraryDependencies ++= Seq("io.github.okay-effects" %% "okay-guard-jvm" % okayGuard,
+      "io.github.okay-effects" %% "okay-serverless-relay" % okayServerless, munit.value),
     Compile / resourceGenerators += Def.task {
       val w = (web / Compile / fullLinkJS / scalaJSLinkerOutputDirectory).value
       val _ = (web / Compile / fullLinkJS).value
@@ -71,7 +76,10 @@ fatJar := {
 
 /** THE RELAY: a Cloudflare Worker — the page, and rooms joining a daemon and its phones (specs/remote.md) */
 lazy val relay = (project in file("relay")).enablePlugins(ScalaJSPlugin)
-  .settings(name := "okay-remote-relay", scalaJSLinkerConfig ~= (_.withModuleKind(ModuleKind.ESModule)))
+  .settings(name := "okay-remote-relay", scalaJSLinkerConfig ~= (_.withModuleKind(ModuleKind.ESModule)),
+    libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-serverless-cloudflare" % okayServerless,
+      "io.github.okay-effects" %%% "okay-serverless-relay" % okayServerless,
+      "io.github.okay-effects" %%% "okay-serverless-telegram" % okayServerless))
 
 /** the relay, linked, with the page's files as text modules: `relay/dist` — then `npx wrangler deploy` */
 val relayDist = taskKey[File]("the relay in relay/dist")

@@ -33,7 +33,7 @@ const until = async (b, f, s = 60) => { for (let i = 0; i < s; i++) { if (await 
     const S = Buffer.from(kept.secret, "base64url");
     const auth = crypto.createHash("sha256").update(Buffer.concat([Buffer.from("okay-remote/auth:"), S])).digest("hex");
     const room = crypto.createHash("sha256").update(auth).digest("hex");
-    const ws = new WebSocket(`${relay.replace(/^http/, "ws")}/r/${room}/phone?auth=${auth}`);
+    const ws = new WebSocket(`${relay.replace(/^http/, "ws")}/r/${room}/guest?auth=${auth}`);
     let strangerGot = [];
     ws.onmessage = e => strangerGot.push(String(e.data));
     await new Promise(r => ws.onopen = r);

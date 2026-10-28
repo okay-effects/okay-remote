@@ -6,7 +6,7 @@ import okay.scala3.std.Lift
 import org.scalajs.dom
 import scala.scalajs.concurrent.JSExecutionContext.Implicits.queue
 import scala.scalajs.js
-import scala.scalajs.js.typedarray.Uint8Array
+import okay.serverless.relay.Pairing
 
 /** THE PAGE, in one line: the program, over its daemon — on the machine (a token, `?t=`) or through the relay (a
  * pairing's secret, `#s=`, never sent anywhere) — each taken out of the address and kept in this browser */
@@ -21,20 +21,12 @@ object Main:
     if token.nonEmpty || secret.nonEmpty then dom.window.history.replaceState(null, "", dom.window.location.pathname)
     val transport: Transport =
       Option(store.getItem(Live.TokenKey)).filter(_.nonEmpty).map(OverHttp(_))
-        .orElse(Option(store.getItem(Live.RelayKey)).flatMap(decode).map(OverRelay(_)))
+        .orElse(Option(store.getItem(Live.RelayKey)).flatMap(Pairing.of(_, "okay-remote")).map(OverRelay(_)))
         .getOrElse(Unpaired)
     val nav = dom.window.navigator.asInstanceOf[js.Dynamic]
     if !js.isUndefined(nav.serviceWorker) then nav.serviceWorker.register("sw.js")
     val _ = Lift.lower(Dom.run(root, Look.skin, follow = true)(Live.Over(transport)(Page.main)))
 
-  /** a pairing's secret, base64url: 32 bytes, or none */
-  def decode(text: String): Option[Uint8Array] = scala.util.Try {
-    val raw = js.Dynamic.global.atob(text.replace('-', '+').replace('_', '/') + "=" * ((4 - text.length % 4) % 4))
-      .asInstanceOf[String]
-    val b = new Uint8Array(raw.length)
-    raw.indices.foreach(i => b(i) = raw.charAt(i).toShort)
-    b
-  }.toOption.filter(_.length == 32)
 
 object Look:
   val skin: Skin =

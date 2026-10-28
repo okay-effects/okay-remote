@@ -39,7 +39,7 @@ const start = (code, chat = 4242) => hook({ update_id: 1, message: { chat: { id:
     check("the page offers Telegram", await b.click("Link Telegram"));
     await b.sleep(800);
     const link = await b.js("[...document.querySelectorAll('a')].map(a=>a.href).find(h=>h.includes('t.me/'))");
-    check("a link for the bot", /^https:\/\/t\.me\/okay_remote_test_bot\?start=[0-9a-f]{24}$/.test(link || ""));
+    check("a link for the bot", /^https:\/\/t\.me\/okay_remote_test_bot\?start=[A-Za-z0-9_-]{60,64}$/.test(link || ""));
     await b.shot("/tmp/or-tg-link.png");
     const code = (link || "").split("start=")[1];
     check("Telegram without its secret: refused", (await hook({ message: {} }, "wrong")).status === 403);
@@ -50,7 +50,7 @@ const start = (code, chat = 4242) => hook({ update_id: 1, message: { chat: { id:
       kept.chat === "4242" && /^[0-9a-f]{64}$/.test(kept.sig));
     check("the page says linked", (await b.text()).includes("Telegram: linked"));
     await start(code, 5555); await b.sleep(1000);
-    check("a code taken twice: refused", sent.some(m => m.chat_id === "5555" && /not valid/.test(m.text)));
+    check("a code taken twice: refused", sent.some(m => m.chat_id === "5555" && /used already|not valid/.test(m.text)));
     // a task that waits for you: the chat told, with no command in it
     await b.click("New"); await b.sleep(400);
     await b.js(`(()=>{const m=[...document.querySelectorAll('select')][1];
