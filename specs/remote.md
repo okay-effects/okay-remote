@@ -86,7 +86,8 @@ phone (the page, from the relay) ──wss──▶ Relay (Cloudflare Worker + a
 ## Any agent: ACP (2026-10-28)
 
 Besides Claude Code by its hook, a session may run any agent that speaks ACP (the Agent Client Protocol: JSON-RPC
-over the agent's stdin and stdout, `core/Acp`). The daemon is the client and says it reads and writes the files and
+over the agent's stdin and stdout) — by okay-guard's ACP adapter (`okay-guard-acp`, its `AcpClient`; okay-remote
+gives it a `Host` and turns its `Event`s into steps). The daemon is the client and says it reads and writes the files and
 runs the terminals; so `fs/write_text_file` (`Write`), `fs/read_text_file` (`Read`) and `terminal/create` (`Bash`)
 are done here, after the gate — the same policy, by Claude Code's tool names — and the commands run in rozum's jail
 where there is one. What the agent does itself it may ask first (`session/request_permission`): the gate answers

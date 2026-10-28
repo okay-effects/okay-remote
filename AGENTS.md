@@ -6,6 +6,9 @@ Read before anything else; then `specs/remote.md`. A change of design is a chang
   https://okay-effects.github.io/okay-guard/maven — after a change there, `sbt publishLibs` in okay-guard
   (republished as 0.1.0 while nobody else uses it; then clear the Coursier cache's copy). A gap in okay-guard or
   okay-ui is fixed there, never worked around here.
+- What is a library's is there: the decision (okay-guard's `Judging`), the journal (okay-guard's `Ledger`), any
+  agent (okay-guard-acp). okay-remote keeps its own: the sessions, the steps, the page, the relay (to move to
+  okay-serverless next).
 - The logic is `core/Remote` over a `Machine` (the JVM's in `daemon/`, a test's in memory): no JDK I/O outside
   `daemon/`, no DOM outside okay-ui's `Dom.run`. The page is an okay-ui program (`web/Page`), its world the effect
   `Live`.

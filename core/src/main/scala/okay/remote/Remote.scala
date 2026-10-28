@@ -2,6 +2,7 @@ package okay.remote
 
 import okay.effects.json.{Descent, Json}
 import okay.guard.{Action, Decision, Entry, Gate, Judged, Judging, Ledger, Outcome, Verdict}
+import okay.guard.acp.{AcpClient, AgentKind, Agents, Event, Host, Line}
 import scala.collection.mutable
 
 /** THE MACHINE, AS THE REMOTE ASKS IT: its files, its time, a process in a directory. The JVM's in `daemon/`; a test's
@@ -40,12 +41,8 @@ object Audit:
     def record(r: Json): Unit = ()
     def policy(hash: String, text: String): Unit = ()
 
-/** an agent's process: a line to it, its lines, its end */
-trait Agent:
-  def send(line: String): Unit
-  def lines(f: String => Unit): Unit
-  def ended(f: String => Unit): Unit
-  def kill(): Unit
+/** an agent's process: a line to it, its lines, its end (okay-guard-acp's `Line`) */
+trait Agent extends Line
 
 /** a session as the list shows it */
 final case class Session(id: String, project: String, model: String, title: String, agent: String = "",
@@ -107,7 +104,7 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
   private def file(s: String) = s"$base/$s"
   private val sessions = mutable.LinkedHashMap.empty[String, Session]
   private val kept = mutable.Map.empty[String, Vector[Step]]
-  private final case class Live(agent: Agent, key: String, acp: Option[AcpSession] = None)
+  private final case class Live(agent: Agent, key: String, acp: Option[AcpClient] = None)
   private val live = mutable.Map.empty[String, Live]
   private final case class Wait(session: String, id: String, tool: String, input: Json, why: String,
     answer: Verdict => Unit)
@@ -270,8 +267,23 @@ final class Remote(m: Machine, port: () => Int, tell: (String, Json) => Unit,
     def command(cmd: String, dir: String): Agent =
       val sh = List("/bin/sh", "-c", cmd + " 2>&1")
       m.spawn(if jail().rozum then List("rozum", "launch", "--no-model", "--") ++ sh else sh, dir)
-    val acp = AcpSession(m, agent, kind, x.project, x.agent, (call, tool, input) => gate(x.id, call, tool, input),
-      st => stepped(x.id, st), command)
+    // okay-guard's ACP adapter: on this machine (its files, its commands), through this gate, its events the steps
+    val host = new Host:
+      def now: Long = m.now
+      def randomHex(bytes: Int): String = m.randomHex(bytes)
+      def read(path: String): Option[String] = m.read(path)
+      def write(path: String, text: String): Unit = m.save(path, text)
+      def run(cmd: String, dir: String): Line = command(cmd, dir)
+    val acp = AcpClient(host, agent, kind, x.project, x.agent,
+      (call, tool, input) => answer => gate(x.id, call, tool, input)((v, why) => answer(v == "allow", why)),
+      {
+        case Event.Began(s, a) => stepped(x.id, Step.Began(s, a))
+        case Event.Said(t) => stepped(x.id, Step.Said(t))
+        case Event.Tool(i, n, in) => stepped(x.id, Step.Tool(i, n, in))
+        case Event.Result(i, t, e) => stepped(x.id, Step.Result(i, t, e))
+        case Event.Ended(ok, r, ms) => stepped(x.id, Step.Ended(ok, r, ms, 0, 0))
+        case Event.Stopped(why) => stepped(x.id, Step.Stopped(why))
+      })
     live(x.id) = Live(agent, m.randomHex(16), Some(acp))
     sessions(x.id) = x.copy(running = true)
     ended(x.id, agent)

@@ -25,7 +25,8 @@ val munit = Def.setting("org.scalameta" %%% "munit" % "1.2.3" % Test)
 lazy val core = crossProject(JVMPlatform, JSPlatform).crossType(CrossType.Pure).in(file("core"))
   .settings(name := "okay-remote-core",
     libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-guard-core" % okayGuard,
-      "io.github.okay-effects" %%% "okay-guard-policy" % okayGuard, munit.value))
+      "io.github.okay-effects" %%% "okay-guard-policy" % okayGuard,
+      "io.github.okay-effects" %%% "okay-guard-acp" % okayGuard, munit.value))
 
 /** THE PAGE: an okay-ui program, phone first — the projects, a session as a conversation, the policy */
 lazy val web = (project in file("web")).enablePlugins(ScalaJSPlugin).dependsOn(core.js)
