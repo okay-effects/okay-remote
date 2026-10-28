@@ -11,9 +11,30 @@ import scala.jdk.CollectionConverters.*
 /** THE DAEMON: `java -jar okay-remote.jar [--port 7788] [--lan]` — the remote over the JVM (okay-guard's `JvmOs`, its
  * one loop), the page's server: the page, its events, its acts — and the agents' hook */
 object Main:
-  def main(args: Array[String]): Unit = JvmOs.loop.execute(() =>
-    if args.headOption.contains("verify") then Daemon.verify()
-    else new Daemon(args.toList).start())
+  val version = "0.1.0"
+  val help: String =
+    s"""okay-remote $version — your coding agents, on your machine, from your phone
+       |
+       |  okay-remote --relay           start; your phone reaches it from anywhere (pair it: open the address
+       |                                printed, then Phone, and scan the QR code)
+       |  okay-remote                   start, for this machine only (or as remembered from --relay before)
+       |  okay-remote --lan             start; a phone on the same network reaches it
+       |  okay-remote verify            check every session's record (its SHA-256 chain)
+       |
+       |  --port N            the page's port (7788)
+       |  --relay URL         your own relay (relay/ in the repository) instead of the hosted one
+       |  --no-relay          forget the relay
+       |  --pair-again        a new pairing secret: every paired phone is out
+       |  --version, --help
+       |
+       |Files: ~/.okay-remote (token, relay.json, policy.policy, sessions/, roots, claude-token).
+       |Docs: https://github.com/okay-effects/okay-remote""".stripMargin
+  def main(args: Array[String]): Unit =
+    if args.contains("--help") || args.contains("-h") then { println(help); sys.exit(0) }
+    if args.contains("--version") then { println(s"okay-remote $version"); sys.exit(0) }
+    JvmOs.loop.execute(() =>
+      if args.headOption.contains("verify") then Daemon.verify()
+      else new Daemon(args.toList).start())
 
 /** the JVM as the remote's machine: okay-guard's `JvmOs` (its loop, its files), and processes started here in a
  * directory with an environment — their output read on threads of their own, handed to the loop */
