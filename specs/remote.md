@@ -29,7 +29,7 @@ phone (PWA) ──HTTP+SSE──▶ the daemon (JVM) ──spawns──▶ claud
   `~/.okay-remote/sessions/<id>.jsonl`, so a page opened later sees the whole run. `--resume <claude's session id>`
   carries a session over a restart of the daemon.
 - **The model**: Claude (`--model opus|sonnet|haiku`), or a local one: `rozum launch --offline --model <spec> --
-  claude …` (rozum's gateway, its sandbox); or okay-llm's gateway (`okay-mlx serve 8090`, the model it serves):
+  claude …` (rozum's gateway, its sandbox); or okay-llm's gateway (`okay-mlx serve 8090`; `--model <repo>`, the gateway loading it):
   `rozum launch --gateway-url http://127.0.0.1:8090 -- claude …` (rozum's sandbox, its network that port), Claude Code
   told `ANTHROPIC_BASE_URL` — without rozum, `claude …` so told, unjailed. `--permission-mode default` keeps rozum
   from adding `--dangerously-skip-permissions`; the hook decides either way.

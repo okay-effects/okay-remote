@@ -198,10 +198,11 @@ class RemoteSuite extends munit.FunSuite:
 
 class ModelsSuite extends munit.FunSuite:
   test("okay-llm's gateway: Claude Code told its URL, in rozum's jail with the network that port alone"):
-    val model = s"okay:${Models.gateway}"
+    val model = "okay:mlx-community/Qwen3.5-9B-MLX-4bit"
     assert(Models.all.exists(_._1 == model))
     val (jailed, env) = Models.command(model, "{}", "", Jail(rozum = true))
     assertEquals(jailed.take(5), List("rozum", "launch", "--gateway-url", "http://127.0.0.1:8090", "--"))
+    assertEquals(jailed.takeRight(2), List("--model", "mlx-community/Qwen3.5-9B-MLX-4bit"))
     assertEquals(env("ANTHROPIC_BASE_URL"), "http://127.0.0.1:8090")
     assert(!env.contains("ROZUM_SANDBOX_NETWORK"))
     val (bare, _) = Models.command(model, "{}", "", Jail())

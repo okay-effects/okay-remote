@@ -48,13 +48,16 @@ object Models:
   /** what goes through the policy for a session on it */
   def through(model: String): String =
     Agents.of(model).fold("every tool call (Claude Code's hook)")(_.through)
-  /** okay-llm's gateway (`okay-mlx serve 8090`): whatever model it serves */
+  /** okay-llm's gateway (`okay-mlx serve 8090`): a session's model named in each request (Claude Code's `--model`),
+   * the gateway loading it in place of the one it has */
   val gateway = "http://127.0.0.1:8090"
   val all: List[(String, String)] = List(
     "claude:sonnet" -> "Claude Sonnet", "claude:opus" -> "Claude Opus", "claude:haiku" -> "Claude Haiku",
     "local:mlx-community:Qwen3.6-35B-A3B-4bit" -> "Local · Qwen3.6 35B (rozum)",
     "local:mlx-community:Qwen3.5-4B-MLX-4bit" -> "Local · Qwen3.5 4B (rozum)",
-    s"okay:$gateway" -> "Local · okay-mlx gateway (:8090)")
+    "okay:mlx-community/Qwen3.6-35B-A3B-4bit" -> "Local · Qwen3.6 35B (okay-mlx)",
+    "okay:mlx-community/Qwen3.5-9B-MLX-4bit" -> "Local · Qwen3.5 9B (okay-mlx)",
+    "okay:mlx-community/Qwen3.5-4B-MLX-4bit" -> "Local · Qwen3.5 4B (okay-mlx)")
   def local(model: String): Boolean = model.startsWith("local:") || model.startsWith("okay:")
 
   /** the command of a session's agent and what it adds to the environment: Claude Code, steered by lines of JSON,
@@ -66,10 +69,13 @@ object Models:
     if model.startsWith("local:") then
       (List("rozum", "launch", "--offline", "--model", model.stripPrefix("local:"), "--") ++ claude, Map.empty)
     else if model.startsWith("okay:") then
-      // Claude Code on okay-llm's gateway: in rozum's jail where there is one, its network that port alone
-      val url = model.stripPrefix("okay:")
-      val env = Map("ANTHROPIC_BASE_URL" -> url, "ANTHROPIC_API_KEY" -> "local")
-      if jail.rozum then (List("rozum", "launch", "--gateway-url", url, "--") ++ claude, env) else (claude, env)
+      // Claude Code on okay-llm's gateway, the model named: in rozum's jail where there is one, its network that
+      // port alone (its proxy passes the model's name through; its own name for the small requests switches none)
+      val repo = model.stripPrefix("okay:")
+      val withModel = if repo.startsWith("http") then claude else claude ++ List("--model", repo)
+      val env = Map("ANTHROPIC_BASE_URL" -> gateway, "ANTHROPIC_API_KEY" -> "local")
+      if jail.rozum then (List("rozum", "launch", "--gateway-url", gateway, "--") ++ withModel, env)
+      else (withModel, env)
     else
       val withModel = claude ++ List("--model", model.stripPrefix("claude:"))
       jail.claudeToken match

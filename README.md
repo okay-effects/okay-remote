@@ -73,8 +73,9 @@ Install [rozum](https://github.com/sergey-scherbina/rozum) (macOS, Apple Silicon
 with no cloud and no key. With rozum installed, the commands of the other agents run in its sandbox too.
 
 Or [okay-mlx](https://github.com/okay-effects/okay-mlx)'s gateway (okay-llm on MLX: a prefix cache in memory and on
-disk, sampling, penalties): `MLX_MODEL=mlx-community/Qwen3.6-35B-A3B-4bit … serve 8090`, then **Local · okay-mlx
-gateway (:8090)** on New — Claude Code on it, in rozum's sandbox when rozum is there (its network that port alone).
+disk, sampling, penalties): `… serve 8090`, then **Local · Qwen3.6 35B (okay-mlx)** (or 9B, 4B) on New — Claude
+Code on it, in rozum's sandbox when rozum is there (its network that port alone). The gateway loads the model a
+session names in place of the one it has (one in memory; a switch waits for the other model's turn to end).
 
 ## Safe, in layers
 
