@@ -29,8 +29,10 @@ phone (PWA) ──HTTP+SSE──▶ the daemon (JVM) ──spawns──▶ claud
   `~/.okay-remote/sessions/<id>.jsonl`, so a page opened later sees the whole run. `--resume <claude's session id>`
   carries a session over a restart of the daemon.
 - **The model**: Claude (`--model opus|sonnet|haiku`), or a local one: `rozum launch --offline --model <spec> --
-  claude …` (rozum's gateway, its sandbox). `--permission-mode default` keeps rozum from adding
-  `--dangerously-skip-permissions`; the hook decides either way.
+  claude …` (rozum's gateway, its sandbox); or okay-llm's gateway (`okay-mlx serve 8090`, the model it serves):
+  `rozum launch --gateway-url http://127.0.0.1:8090 -- claude …` (rozum's sandbox, its network that port), Claude Code
+  told `ANTHROPIC_BASE_URL` — without rozum, `claude …` so told, unjailed. `--permission-mode default` keeps rozum
+  from adding `--dangerously-skip-permissions`; the hook decides either way.
 - **The policy**: Claude Code's `PreToolUse` hook (given with `--settings`, matcher `*`) posts each tool call to the
   daemon (`/hook/<session>`), which decides it by an okay-guard policy (okay-policy, the language of okay-guard):
   `allow` → the call goes; `deny` → it does not, the agent told why; `ask` → the phone is asked, the hook waits

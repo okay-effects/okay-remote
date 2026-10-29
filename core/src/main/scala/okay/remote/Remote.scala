@@ -36,7 +36,7 @@ object Session:
     str(j, "model").getOrElse(""), str(j, "title").getOrElse(""), str(j, "agent").getOrElse(""),
     long(j, "created"), long(j, "updated"), bool(j, "running"), bool(j, "busy"), long(j, "waiting").toInt))
 
-/** THE MODELS A SESSION MAY RUN ON: Claude's, and the local ones through rozum */
+/** THE MODELS A SESSION MAY RUN ON: Claude's, the local ones through rozum, and okay-llm's gateway (okay-mlx) */
 object Models:
   /** what a session may run on here: Claude Code with Claude or a local model, and the ACP agents installed */
   def here[R[_]](using In[Processes, R]): List[(String, String)] ! R =
@@ -48,10 +48,14 @@ object Models:
   /** what goes through the policy for a session on it */
   def through(model: String): String =
     Agents.of(model).fold("every tool call (Claude Code's hook)")(_.through)
+  /** okay-llm's gateway (`okay-mlx serve 8090`): whatever model it serves */
+  val gateway = "http://127.0.0.1:8090"
   val all: List[(String, String)] = List(
     "claude:sonnet" -> "Claude Sonnet", "claude:opus" -> "Claude Opus", "claude:haiku" -> "Claude Haiku",
     "local:mlx-community:Qwen3.6-35B-A3B-4bit" -> "Local · Qwen3.6 35B (rozum)",
-    "local:mlx-community:Qwen3.5-4B-MLX-4bit" -> "Local · Qwen3.5 4B (rozum)")
+    "local:mlx-community:Qwen3.5-4B-MLX-4bit" -> "Local · Qwen3.5 4B (rozum)",
+    s"okay:$gateway" -> "Local · okay-mlx gateway (:8090)")
+  def local(model: String): Boolean = model.startsWith("local:") || model.startsWith("okay:")
 
   /** the command of a session's agent and what it adds to the environment: Claude Code, steered by lines of JSON,
    * every tool call through the hook; in rozum's jail where it can be (specs/remote.md, "Safety, in layers") */
@@ -61,6 +65,11 @@ object Models:
       (if resume.nonEmpty then List("--resume", resume) else Nil)
     if model.startsWith("local:") then
       (List("rozum", "launch", "--offline", "--model", model.stripPrefix("local:"), "--") ++ claude, Map.empty)
+    else if model.startsWith("okay:") then
+      // Claude Code on okay-llm's gateway: in rozum's jail where there is one, its network that port alone
+      val url = model.stripPrefix("okay:")
+      val env = Map("ANTHROPIC_BASE_URL" -> url, "ANTHROPIC_API_KEY" -> "local")
+      if jail.rozum then (List("rozum", "launch", "--gateway-url", url, "--") ++ claude, env) else (claude, env)
     else
       val withModel = claude ++ List("--model", model.stripPrefix("claude:"))
       jail.claudeToken match

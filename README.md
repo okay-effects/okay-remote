@@ -72,6 +72,10 @@ Install [rozum](https://github.com/sergey-scherbina/rozum) (macOS, Apple Silicon
 (`rozum models pull …`). The agents **Local · …** on New then run Claude Code on that model, inside rozum's sandbox,
 with no cloud and no key. With rozum installed, the commands of the other agents run in its sandbox too.
 
+Or [okay-mlx](https://github.com/okay-effects/okay-mlx)'s gateway (okay-llm on MLX: a prefix cache in memory and on
+disk, sampling, penalties): `MLX_MODEL=mlx-community/Qwen3.6-35B-A3B-4bit … serve 8090`, then **Local · okay-mlx
+gateway (:8090)** on New — Claude Code on it, in rozum's sandbox when rozum is there (its network that port alone).
+
 ## Safe, in layers
 
 1. **The policy decides every action** before it is done. Claude Code is held by its PreToolUse hook (every tool
