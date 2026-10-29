@@ -42,9 +42,19 @@ object Models:
   def here[R[_]](using In[Processes, R]): List[(String, String)] ! R =
     val wanted = ("claude" :: Agents.all.flatMap(_.needs)).distinct
     wanted.foldLeft(pure[Map[String, Boolean], R](Map.empty))((acc, n) =>
-      acc.flatMap(m => Processes.onPath[R](n).map(b => m + (n -> b)))).map(has =>
-      (if has("claude") then all else Nil) ++
-        Agents.all.filter(_.needs.forall(has)).map(a => s"acp:${a.id}" -> a.label))
+      acc.flatMap(m => Processes.onPath[R](n).map(b => m + (n -> b)))).flatMap(has =>
+      (if has("claude") then okayMlx[R] else pure[List[(String, String)], R](Nil)).map(gw =>
+        (if has("claude") then all else Nil) ++ gw ++
+          Agents.all.filter(_.needs.forall(has)).map(a => s"acp:${a.id}" -> a.label)))
+
+  /** the models okay-llm's gateway has (its `/v1/models`, the one loaded first): one at a time in memory, the one a
+   * session names loaded in place of the other; none when no gateway answers */
+  def okayMlx[R[_]](using In[Processes, R]): List[(String, String)] ! R =
+    Processes.run[R](List("curl", "-s", "-m", "2", s"$gateway/v1/models"), "/", 100000).map((code, out) =>
+      if code != 0 then Nil
+      else
+        scala.util.Try(Json.fromText(out)("data").list.map(_("id").string).toList).getOrElse(Nil).zipWithIndex
+          .map((id, i) => s"okay:$id" -> s"Local · ${id.split('/').last} (okay-mlx${if i == 0 then ", loaded" else ""})"))
   /** what goes through the policy for a session on it */
   def through(model: String): String =
     Agents.of(model).fold("every tool call (Claude Code's hook)")(_.through)
@@ -54,10 +64,7 @@ object Models:
   val all: List[(String, String)] = List(
     "claude:sonnet" -> "Claude Sonnet", "claude:opus" -> "Claude Opus", "claude:haiku" -> "Claude Haiku",
     "local:mlx-community:Qwen3.6-35B-A3B-4bit" -> "Local · Qwen3.6 35B (rozum)",
-    "local:mlx-community:Qwen3.5-4B-MLX-4bit" -> "Local · Qwen3.5 4B (rozum)",
-    "okay:mlx-community/Qwen3.6-35B-A3B-4bit" -> "Local · Qwen3.6 35B (okay-mlx)",
-    "okay:mlx-community/Qwen3.5-9B-MLX-4bit" -> "Local · Qwen3.5 9B (okay-mlx)",
-    "okay:mlx-community/Qwen3.5-4B-MLX-4bit" -> "Local · Qwen3.5 4B (okay-mlx)")
+    "local:mlx-community:Qwen3.5-4B-MLX-4bit" -> "Local · Qwen3.5 4B (rozum)")
   def local(model: String): Boolean = model.startsWith("local:") || model.startsWith("okay:")
 
   /** the command of a session's agent and what it adds to the environment: Claude Code, steered by lines of JSON,

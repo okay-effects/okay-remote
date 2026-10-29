@@ -199,7 +199,6 @@ class RemoteSuite extends munit.FunSuite:
 class ModelsSuite extends munit.FunSuite:
   test("okay-llm's gateway: Claude Code told its URL, in rozum's jail with the network that port alone"):
     val model = "okay:mlx-community/Qwen3.5-9B-MLX-4bit"
-    assert(Models.all.exists(_._1 == model))
     val (jailed, env) = Models.command(model, "{}", "", Jail(rozum = true))
     assertEquals(jailed.take(5), List("rozum", "launch", "--gateway-url", "http://127.0.0.1:8090", "--"))
     assertEquals(jailed.takeRight(2), List("--model", "mlx-community/Qwen3.5-9B-MLX-4bit"))
@@ -208,3 +207,18 @@ class ModelsSuite extends munit.FunSuite:
     val (bare, _) = Models.command(model, "{}", "", Jail())
     assertEquals(bare.head, "claude")
     assert(Models.local(model))
+
+  test("okay-llm's gateway: its models offered, the one loaded first; none when it does not answer"):
+    val m = MemoryWorld()
+    m.runAnswer = c =>
+      if c.headOption.contains("curl") then (0, """{"data": [{"id": "mlx-community/Qwen3.6-35B-A3B-4bit"},
+        {"id": "mlx-community/Qwen3.5-9B-MLX-4bit"}]}""")
+      else (0, "")
+    def offer = scala.concurrent.Await.result(World.run(m.ports)(Models.okayMlx[World]),
+      scala.concurrent.duration.Duration(5, "s"))
+    val offered = offer
+    assertEquals(offered, List(
+      "okay:mlx-community/Qwen3.6-35B-A3B-4bit" -> "Local · Qwen3.6-35B-A3B-4bit (okay-mlx, loaded)",
+      "okay:mlx-community/Qwen3.5-9B-MLX-4bit" -> "Local · Qwen3.5-9B-MLX-4bit (okay-mlx)"))
+    m.runAnswer = _ => (7, "")
+    assertEquals(offer, Nil)
