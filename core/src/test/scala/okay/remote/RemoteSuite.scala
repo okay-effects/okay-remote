@@ -240,3 +240,10 @@ class ModelsSuite extends munit.FunSuite:
     val plain = okay.effects.json.Json.fromText(Models.acp("acp:opencode").get._2("OPENCODE_CONFIG_CONTENT"))
     assertEquals(plain("permission")("*").string, "ask")
     assert(plain.field("model").isEmpty)
+
+  test("paths as the projects are: macOS's /tmp, /var, /etc are /private/…, others as they are"):
+    assertEquals(Paths.real("/tmp/p/notes.txt"), "/private/tmp/p/notes.txt")
+    assertEquals(Paths.real("/var/folders/x"), "/private/var/folders/x")
+    assertEquals(Paths.real("/private/tmp/p"), "/private/tmp/p")
+    assertEquals(Paths.real("/tmpfoo/x"), "/tmpfoo/x")
+    assertEquals(Paths.real("/Users/me/p/a.txt"), "/Users/me/p/a.txt")

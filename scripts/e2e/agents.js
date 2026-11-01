@@ -22,7 +22,7 @@ const check = (what, ok) => { console.log(`${ok ? "✓" : "✗"} ${label}: ${wha
     const token = fs.readFileSync(`${home}/.okay-remote/token`, "utf8").trim();
     await b.go(`http://127.0.0.1:7794/?t=${token}`);
     await b.click("New"); await b.sleep(400);
-    const task = "Create the file notes.txt containing the word hello. Then run this shell command on its own: " +
+    const task = "Create the file notes.txt in the project directory (the current one) containing the word hello. Then run this shell command on its own: " +
       "python3 -c \"print(6*7)\" and tell me what it printed. Do nothing else.";
     const chosen = await b.js(`(()=>{const m=[...document.querySelectorAll('select')][1];
       const o=[...m.options].find(o=>o.text===${JSON.stringify(label)}); if(!o) return false;

@@ -36,6 +36,11 @@ object Session:
     str(j, "model").getOrElse(""), str(j, "title").getOrElse(""), str(j, "agent").getOrElse(""),
     long(j, "created"), long(j, "updated"), bool(j, "running"), bool(j, "busy"), long(j, "waiting").toInt))
 
+/** PATHS AS THE PROJECTS ARE: kept real-pathed, and macOS's own links — /tmp, /var, /etc — are /private/… */
+object Paths:
+  def real(path: String): String =
+    if Seq("/tmp", "/var", "/etc").exists(r => path == r || path.startsWith(r + "/")) then "/private" + path else path
+
 /** THE MODELS A SESSION MAY RUN ON: Claude's, the local ones through rozum, and okay-llm's gateway (okay-mlx) */
 object Models:
   /** what a session may run on here: Claude Code with Claude or a local model, and the ACP agents installed */
@@ -439,8 +444,12 @@ final class Remote(ports: World.Ports, port: () => Int, judgeOf: String => Eithe
   def gate(id: String, call: String, tool: String, input: Json)(answer: (String, String) => Unit): Unit =
     val project = sessions.get(id).fold("")(_.project)
     val dir = if project.endsWith("/") then project else project + "/"
+    // a file's path as the project's is (real): an agent writing /tmp/… for a project in /private/tmp/… is in it
+    def realPath(k: String, v: Json) = v match
+      case Json.Str(s) if k == "file_path" || k == "path" => k -> Json.Str(Paths.real(s))
+      case _ => k -> v
     val args = input match
-      case o: Json.Obj => Json.Obj(o.fields.filterNot(_._1 == "cwd") :+ ("cwd" -> Json.Str(dir)))
+      case o: Json.Obj => Json.Obj(o.fields.filterNot(_._1 == "cwd").map(realPath) :+ ("cwd" -> Json.Str(dir)))
       case _ => Json.obj("cwd" -> Json.Str(dir))
     val service = sessions.get(id).fold("")(x => Models.acp(x.model).fold("claude")(_._1.id))
     val action = Action(Json.Str(call), tool, args, service, "agent",
