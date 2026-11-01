@@ -296,7 +296,7 @@ object Page:
         val line = s"${if ok then "Done" else "Not done"} · ${ms / 1000} s" +
           (if turns > 0 then s" · $turns turns" else "") +
           // a local model costs nothing: Claude Code's sum is by Claude's prices
-          (if x.model.startsWith("local:") || x.model.startsWith("okay:")
+          (if x.model.startsWith("local:") || x.model.contains("okay:")
             || cost <= 0 then "" else if cost >= 0.01 then f" · $$$cost%.2f"
           else f" · $$$cost%.3f")
         List(Part.block(if ok then "end" else "end-failed")((Part.block("small")(Part.text(line)) ::

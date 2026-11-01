@@ -108,7 +108,7 @@ Tried end to end (`scripts/e2e/agents.js "<label>"`, a phone's screen, 2026-10-2
 | Claude Code (ACP) | `@zed-industries/claude-code-acp` | ✓ file through the client, command through the client's terminal, asked and approved |
 | Qwen Code | `qwen --acp --approval-mode default` (here on a local model through rozum) | ✓ file through the client; its shell asked through `request_permission`, approved |
 | Codex | `@zed-industries/codex-acp` 0.16.0 | ✗ the adapter does not know this Codex's models ("unknown variant `max`"): Internal error. Next: Codex's own `app-server` |
-| opencode | `opencode acp` | not logged in here: not tried |
+| opencode | `opencode acp` — on okay-llm's gateway: New offers `opencode · <model> (okay-mlx)` for each model the gateway lists, the agent started with `OPENCODE_CONFIG_CONTENT` (the okay-mlx provider and that model: no config of its own needed) | see e2e agents.js |
 | Gemini CLI, Goose | `--experimental-acp`, `goose acp` | not installed here: not tried |
 
 Found on the way: with its own approval mode `auto`, Qwen Code ran a command itself, asking no one — so the approval

@@ -78,6 +78,10 @@ loaded marked — Claude Code on it, in rozum's sandbox when rozum is there (its
 loads the model a session names in place of the one it has (one in memory; a switch waits for the other model's turn
 to end).
 
+opencode too: New offers **opencode · <model> (okay-mlx)** for each model the gateway has — started with the
+provider and the model given it inline (`OPENCODE_CONFIG_CONTENT`), and set to ask for every tool, so each call goes
+through the policy (left to itself, opencode runs its shell without asking).
+
 ## Safe, in layers
 
 1. **The policy decides every action** before it is done. Claude Code is held by its PreToolUse hook (every tool

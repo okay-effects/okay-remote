@@ -43,9 +43,35 @@ object Models:
     val wanted = ("claude" :: Agents.all.flatMap(_.needs)).distinct
     wanted.foldLeft(pure[Map[String, Boolean], R](Map.empty))((acc, n) =>
       acc.flatMap(m => Processes.onPath[R](n).map(b => m + (n -> b)))).flatMap(has =>
-      (if has("claude") then okayMlx[R] else pure[List[(String, String)], R](Nil)).map(gw =>
-        (if has("claude") then all else Nil) ++ gw ++
-          Agents.all.filter(_.needs.forall(has)).map(a => s"acp:${a.id}" -> a.label)))
+      (if has("claude") || has("opencode") then okayMlx[R] else pure[List[(String, String)], R](Nil)).map(gw =>
+        (if has("claude") then all ++ gw else Nil) ++
+          Agents.all.filter(_.needs.forall(has)).map(a => s"acp:${a.id}" -> a.label) ++
+          (if has("opencode") then gw.map((id, label) => s"acp:opencode@$id" -> label.replace("Local · ", "opencode · "))
+          else Nil)))
+
+  /** an ACP agent a session runs, and what its process adds to the environment: one of okay-guard's, or opencode
+   * on okay-llm's gateway (`acp:opencode@okay:<repo>`) — the okay-mlx provider and that model given it inline */
+  def acp(model: String): Option[(AgentKind, Map[String, String])] =
+    if model.startsWith("acp:opencode@okay:") then
+      val repo = model.stripPrefix("acp:opencode@okay:")
+      Agents.of("acp:opencode").map(_ -> Map("OPENCODE_CONFIG_CONTENT" -> opencodeOn(Some(repo))))
+    else if model == "acp:opencode" then Agents.of(model).map(_ -> Map("OPENCODE_CONFIG_CONTENT" -> opencodeOn(None)))
+    else Agents.of(model).map(_ -> Map.empty)
+
+  /** opencode asks for every tool — through ACP's request_permission, so the gate decides each: left to itself it
+   * runs its shell without asking (seen: a command run, the gate never told) */
+  private val opencodeAsks = Json.obj("*" -> Json.Str("ask"), "edit" -> Json.Str("ask"), "bash" -> Json.Str("ask"),
+    "webfetch" -> Json.Str("ask"), "external_directory" -> Json.Str("ask"))
+
+  /** opencode's config given it inline: every tool asked; on okay-llm's gateway, its provider (OpenAI's API, the
+   * gateway's URL) and `repo` the model */
+  def opencodeOn(repo: Option[String]): String = Json.print(Json.Obj(Vector("permission" -> opencodeAsks) ++
+    repo.toVector.flatMap(r => Vector(
+      "provider" -> Json.obj("okay-mlx" -> Json.obj(
+        "npm" -> Json.Str("@ai-sdk/openai-compatible"), "name" -> Json.Str("okay-mlx (local MLX)"),
+        "options" -> Json.obj("baseURL" -> Json.Str(s"$gateway/v1"), "apiKey" -> Json.Str("local")),
+        "models" -> Json.obj(r -> Json.obj("name" -> Json.Str(r), "tool_call" -> Json.Bool(true))))),
+      "model" -> Json.Str(s"okay-mlx/$r")))))
 
   /** the models okay-llm's gateway has (its `/v1/models`, the one loaded first): one at a time in memory, the one a
    * session names loaded in place of the other; none when no gateway answers */
@@ -57,7 +83,7 @@ object Models:
           .map((id, i) => s"okay:$id" -> s"Local · ${id.split('/').last} (okay-mlx${if i == 0 then ", loaded" else ""})"))
   /** what goes through the policy for a session on it */
   def through(model: String): String =
-    Agents.of(model).fold("every tool call (Claude Code's hook)")(_.through)
+    acp(model).fold("every tool call (Claude Code's hook)")(_._1.through)
   /** okay-llm's gateway (`okay-mlx serve 8090`): a session's model named in each request (Claude Code's `--model`),
    * the gateway loading it in place of the one it has */
   val gateway = "http://127.0.0.1:8090"
@@ -309,12 +335,12 @@ final class Remote(ports: World.Ports, port: () => Int, judgeOf: String => Eithe
           _ <- changed(id)
         yield Right(())
 
-  private def run(x: Session): Unit ! W = Agents.of(x.model) match
-    case Some(kind) => runAcp(x, kind)
+  private def run(x: Session): Unit ! W = Models.acp(x.model) match
+    case Some((kind, env)) => runAcp(x, kind, env)
     case None => runClaude(x)
 
   /** an agent over ACP: started in the project, its files and commands through the gate, its updates the steps */
-  private def runAcp(x: Session, kind: AgentKind): Unit ! W =
+  private def runAcp(x: Session, kind: AgentKind, env: Map[String, String]): Unit ! W =
     // the agent's commands, run here: in rozum's jail where there is one (writes in the project only, no secrets)
     def command(cmd: String, dir: String): Agent ! W =
       val sh = List("/bin/sh", "-c", cmd + " 2>&1")
@@ -325,7 +351,7 @@ final class Remote(ports: World.Ports, port: () => Int, judgeOf: String => Eithe
       def write(path: String, text: String)(done: () => Unit): Unit = go(Files.save[W](path, text))(_ => done())
       def run(cmd: String, dir: String)(started: Line => Unit): Unit = go(command(cmd, dir))(started)
     for
-      agent <- Processes.spawn[W](kind.command, x.project)
+      agent <- Processes.spawn[W](kind.command, x.project, env)
       key <- hex(16)
     yield
       val acp = AcpClient(host, agent, kind, x.project, x.agent,
@@ -416,7 +442,7 @@ final class Remote(ports: World.Ports, port: () => Int, judgeOf: String => Eithe
     val args = input match
       case o: Json.Obj => Json.Obj(o.fields.filterNot(_._1 == "cwd") :+ ("cwd" -> Json.Str(dir)))
       case _ => Json.obj("cwd" -> Json.Str(dir))
-    val service = sessions.get(id).fold("")(x => Agents.of(x.model).fold("claude")(_.id))
+    val service = sessions.get(id).fold("")(x => Models.acp(x.model).fold("claude")(_._1.id))
     val action = Action(Json.Str(call), tool, args, service, "agent",
       Json.obj("session" -> Json.Str(id), "project" -> Json.Str(project)))
     acting(call) = action

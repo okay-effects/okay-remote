@@ -34,7 +34,7 @@ const check = (what, ok) => { console.log(`${ok ? "✓" : "✗"} ${label}: ${wha
     await b.click("Start");
     const card = `[...document.querySelectorAll('[class*=okay-mark-call-wait]')].pop()`;
     let ended = false, approved = 0;
-    for (let i = 0; i < 150 && !ended; i++) {
+    for (let i = 0; i < (+process.env.AGENT_WAIT || 150) && !ended; i++) {
       if (i % 30 === 29) await b.shot(`/tmp/or-${slug}-at-${i}.png`);
       await b.sleep(1000);
       const text = await b.text();

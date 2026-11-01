@@ -222,3 +222,21 @@ class ModelsSuite extends munit.FunSuite:
       "okay:mlx-community/Qwen3.5-9B-MLX-4bit" -> "Local · Qwen3.5-9B-MLX-4bit (okay-mlx)"))
     m.runAnswer = _ => (7, "")
     assertEquals(offer, Nil)
+
+  test("opencode on okay-llm's gateway: offered for each model it lists, started with the provider and model inline"):
+    val m = MemoryWorld(has = n => n == "claude" || n == "opencode")
+    m.runAnswer = c =>
+      if c.headOption.contains("curl") then (0, """{"data": [{"id": "a/b"}]}""") else (0, "")
+    val here = scala.concurrent.Await.result(World.run(m.ports)(Models.here[World]),
+      scala.concurrent.duration.Duration(5, "s"))
+    assert(here.contains("acp:opencode@okay:a/b" -> "opencode · b (okay-mlx, loaded)"), here.toString)
+    val Some((kind, env)) = Models.acp("acp:opencode@okay:a/b"): @unchecked
+    assertEquals(kind.id, "opencode")
+    val conf = okay.effects.json.Json.fromText(env("OPENCODE_CONFIG_CONTENT"))
+    assertEquals(conf("model").string, "okay-mlx/a/b")
+    assertEquals(conf("provider")("okay-mlx")("options")("baseURL").string, "http://127.0.0.1:8090/v1")
+    assertEquals(conf("permission")("bash").string, "ask")
+    // opencode alone: every tool asked too (its shell runs unasked otherwise)
+    val plain = okay.effects.json.Json.fromText(Models.acp("acp:opencode").get._2("OPENCODE_CONFIG_CONTENT"))
+    assertEquals(plain("permission")("*").string, "ask")
+    assert(plain.field("model").isEmpty)
