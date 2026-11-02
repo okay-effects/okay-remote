@@ -241,6 +241,17 @@ class ModelsSuite extends munit.FunSuite:
     assertEquals(plain("permission")("*").string, "ask")
     assert(plain.field("model").isEmpty)
 
+  test("okay-agent on okay-llm's gateway: offered for each model it lists, started with that model and the gateway"):
+    val m = MemoryWorld(has = n => n == "okay-agent")
+    m.runAnswer = c =>
+      if c.headOption.contains("curl") then (0, """{"data": [{"id": "a/b"}]}""") else (0, "")
+    val here = scala.concurrent.Await.result(World.run(m.ports)(Models.here[World]),
+      scala.concurrent.duration.Duration(5, "s"))
+    assert(here.contains("acp:okay-agent@okay:a/b" -> "okay-agent · b (okay-mlx, loaded)"), here.toString)
+    val Some((kind, env)) = Models.acp("acp:okay-agent@okay:a/b"): @unchecked
+    assertEquals(kind.command, List("okay-agent", "acp"))
+    assertEquals(env, Map("OKAY_AGENT_MODEL" -> "a/b", "OKAY_AGENT_URL" -> "http://127.0.0.1:8090/v1"))
+
   test("paths as the projects are: macOS's /tmp, /var, /etc are /private/…, others as they are"):
     assertEquals(Paths.real("/tmp/p/notes.txt"), "/private/tmp/p/notes.txt")
     assertEquals(Paths.real("/var/folders/x"), "/private/var/folders/x")

@@ -45,23 +45,33 @@ object Paths:
 object Models:
   /** what a session may run on here: Claude Code with Claude or a local model, and the ACP agents installed */
   def here[R[_]](using In[Processes, R]): List[(String, String)] ! R =
-    val wanted = ("claude" :: Agents.all.flatMap(_.needs)).distinct
+    val wanted = ("claude" :: "okay-agent" :: Agents.all.flatMap(_.needs)).distinct
     wanted.foldLeft(pure[Map[String, Boolean], R](Map.empty))((acc, n) =>
       acc.flatMap(m => Processes.onPath[R](n).map(b => m + (n -> b)))).flatMap(has =>
-      (if has("claude") || has("opencode") then okayMlx[R] else pure[List[(String, String)], R](Nil)).map(gw =>
+      (if has("claude") || has("opencode") || has("okay-agent") then okayMlx[R] else pure[List[(String, String)], R](Nil)).map(gw =>
         (if has("claude") then all ++ gw else Nil) ++
           Agents.all.filter(_.needs.forall(has)).map(a => s"acp:${a.id}" -> a.label) ++
           (if has("opencode") then gw.map((id, label) => s"acp:opencode@$id" -> label.replace("Local · ", "opencode · "))
-          else Nil)))
+          else Nil) ++
+          (if has("okay-agent") then gw.map((id, label) => s"acp:okay-agent@$id" ->
+            label.replace("Local · ", "okay-agent · ")) else Nil)))
 
   /** an ACP agent a session runs, and what its process adds to the environment: one of okay-guard's, or opencode
    * on okay-llm's gateway (`acp:opencode@okay:<repo>`) — the okay-mlx provider and that model given it inline */
   def acp(model: String): Option[(AgentKind, Map[String, String])] =
-    if model.startsWith("acp:opencode@okay:") then
+    if model.startsWith("acp:okay-agent@okay:") then
+      Some(okayAgent -> Map("OKAY_AGENT_MODEL" -> model.stripPrefix("acp:okay-agent@okay:"),
+        "OKAY_AGENT_URL" -> s"$gateway/v1"))
+    else if model.startsWith("acp:opencode@okay:") then
       val repo = model.stripPrefix("acp:opencode@okay:")
       Agents.of("acp:opencode").map(_ -> Map("OPENCODE_CONFIG_CONTENT" -> opencodeOn(Some(repo))))
     else if model == "acp:opencode" then Agents.of(model).map(_ -> Map("OPENCODE_CONFIG_CONTENT" -> opencodeOn(None)))
     else Agents.of(model).map(_ -> Map.empty)
+
+  /** okay-agent (okay-effects/okay-agent) as an ACP agent: its files and commands all through the client, so the
+   * gate weighs each; an MCP tool that may change something asked through request_permission */
+  val okayAgent: AgentKind = AgentKind("okay-agent", "okay-agent", List("okay-agent", "acp"), List("okay-agent"),
+    "files and commands through the client; MCP tools that change things asked")
 
   /** opencode asks for every tool — through ACP's request_permission, so the gate decides each: left to itself it
    * runs its shell without asking (seen: a command run, the gate never told) */
