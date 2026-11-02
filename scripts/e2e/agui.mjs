@@ -20,10 +20,11 @@ try {
   const agent = new HttpAgent({ url: `http://127.0.0.1:7795/agui?t=${token}`, threadId: "agui-e2e" });
   agent.messages = [{ id: "u1", role: "user", content: "Create the file notes.txt in the project directory containing " +
     "the word hello. Then run this shell command on its own: python3 -c \"print(6*7)\" and tell me what it printed." }];
-  let interrupts = [], said = "", calls = 0, runs = 0, outcome = "";
+  let interrupts = [], said = "", calls = 0, runs = 0, outcome = "", pieces = 0, messages = 0;
   const sub = { onEvent: ({ event }) => {
     if (event.type === "TOOL_CALL_START") { calls++; console.log("  call", event.toolCallName); }
-    if (event.type === "TEXT_MESSAGE_CONTENT") said += event.delta;
+    if (event.type === "TEXT_MESSAGE_CONTENT") { said += event.delta; pieces++; }
+    if (event.type === "TEXT_MESSAGE_START") messages++;
     if (event.type === "RUN_ERROR") console.log("  error:", event.message);
     if (event.type === "RUN_FINISHED") { outcome = event.outcome?.type || "success";
       interrupts = outcome === "interrupt" ? event.outcome.interrupts : [];
@@ -39,6 +40,7 @@ try {
   check("an interrupt asked and resumed", runs > 1);
   check("the file written", fs.existsSync(`${project}/notes.txt`) && fs.readFileSync(`${project}/notes.txt`, "utf8").includes("hello"));
   check(`the answer (${said.trim().slice(0, 120)})`, said.includes("42"));
+  check(`the words as they came (${pieces} pieces in ${messages} messages)`, pieces > messages);
 } catch (e) { console.log("✗", e); failed++; }
 daemon.kill();
 process.exit(failed ? 1 : 0);

@@ -14,6 +14,8 @@ final class AgUiBridge(act: Json => (Either[String, Json] => Unit) => Unit):
   /** a run on: its stream, its thread, its id, its messages counted */
   private final class Run(val stream: Stream, val thread: String, val id: String):
     var n = 0
+    /** a message streamed now: its id, how much of its text was sent */
+    var typing: Option[(String, Int)] = None
     def emit(e: Json): Unit = stream.write(AgUi.sse(e))
     def message(): String = { n += 1; s"$id-m$n" }
   private val sessions = mutable.Map.empty[String, String]
@@ -21,10 +23,12 @@ final class AgUiBridge(act: Json => (Either[String, Json] => Unit) => Unit):
 
   def serve(r: WebRequest, w: Web): Unit =
     Descent.parse(r.body) match
-      case Left(_) => w.reply(400, List("Content-Type" -> "application/json"), """{"error":"not JSON"}""")
+      case Left(_) =>
+        w.reply(400, ("Content-Type" -> "application/json") :: AgUiBridge.cors, """{"error":"not JSON"}""")
       case Right(body) =>
         val in = AgUi.RunInput.parse(body)
-        val run = Run(w.stream(List("Content-Type" -> "text/event-stream", "Cache-Control" -> "no-store")),
+        val run = Run(w.stream(List("Content-Type" -> "text/event-stream", "Cache-Control" -> "no-store") ++
+          AgUiBridge.cors),
           in.threadId, in.runId)
         run.emit(AgUi.runStarted(in.threadId, in.runId))
         def fail(why: String) = { run.emit(AgUi.runError(why)); run.stream.close() }
@@ -63,10 +67,27 @@ final class AgUiBridge(act: Json => (Either[String, Json] => Unit) => Unit):
   /** what the daemon tells its pages: a step of a session on a run, its event; a call waiting, the run's interrupt */
   def told(event: String, data: Json): Unit = J.str(data, "session").flatMap(s => runs.get(s).map(s -> _)).foreach {
     (session, run) => event match
-      case "step" => J.get(data, "step").foreach(st => AgUiBridge.events(st, run.message(), run.thread, run.id) match
-          case (es, end) =>
-            es.foreach(run.emit)
-            if end then { runs.remove(session); run.stream.close() })
+      // the words as they come: one message, each new piece of its text
+      case "typing" => J.str(data, "text").foreach { t =>
+          val (id, sent) = run.typing.getOrElse { val m = run.message(); run.emit(AgUi.textStart(m)); (m, 0) }
+          if t.length > sent then run.emit(AgUi.textContent(id, t.substring(sent)))
+          run.typing = Some((id, t.length))
+        }
+      case "step" => J.get(data, "step").foreach { st =>
+          // a message streamed: its rest, and its end — its words not again whole
+          val said = J.str(st, "k").contains("said")
+          run.typing.foreach { (id, sent) =>
+            val t = if said then J.str(st, "text").getOrElse("") else ""
+            if t.length > sent then run.emit(AgUi.textContent(id, t.substring(sent)))
+            run.emit(AgUi.textEnd(id))
+          }
+          val streamed = run.typing.isDefined && said
+          run.typing = None
+          if !streamed then AgUiBridge.events(st, run.message(), run.thread, run.id) match
+            case (es, end) =>
+              es.foreach(run.emit)
+              if end then { runs.remove(session); run.stream.close() }
+        }
       case "waiting" =>
         val call = J.str(data, "call").getOrElse("")
         val input = J.get(data, "input").getOrElse(Json.Obj.empty)
@@ -80,6 +101,11 @@ final class AgUiBridge(act: Json => (Either[String, Json] => Unit) => Unit):
   }
 
 object AgUiBridge:
+  /** any origin may run a session's agent — with the token (in `?t=` or `x-okay-token`): the token is the secret */
+  val cors: List[(String, String)] = List("Access-Control-Allow-Origin" -> "*",
+    "Access-Control-Allow-Headers" -> "content-type, x-okay-token, accept",
+    "Access-Control-Allow-Methods" -> "POST, OPTIONS")
+
   /** a session's step as AG-UI events, and whether the run ends with it */
   def events(step: Json, messageId: String, thread: String, runId: String): (Vector[Json], Boolean) =
     def s(k: String) = J.str(step, k).getOrElse("")

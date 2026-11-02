@@ -115,6 +115,13 @@ Tried end to end (`scripts/e2e/agents.js "<label>"`, a phone's screen, 2026-10-2
 Found on the way: with its own approval mode `auto`, Qwen Code ran a command itself, asking no one — so the approval
 mode is the daemon's to set, per agent. When the daemon stops, every process it started stops with it.
 
+## The agent's words as they come (2026-11-02)
+
+An ACP agent's message chunks (okay-guard's `Event.Saying`: the text so far) are told the pages as `typing`
+(ten a second at most) and NOT kept: the page shows them in a bubble ending " …", replaced by the agent's next step
+(its words whole, kept as `Said`, or a call). Through the relay too. Checked: agents.js on okay-agent — the bubble
+changed 12 times in one task.
+
 ## Every session an AG-UI agent (2026-11-02)
 
 `POST /agui?t=<token>` (or the token in `x-okay-token`): AG-UI 1.0's RunAgentInput, answered with the run's events
@@ -129,6 +136,10 @@ a front end of any session, whatever agent it runs (Claude Code, opencode, okay-
 - A call waiting for the phone: the run ends with an interrupt (`outcome: interrupt`, id = the call, reason
   `approval`, payload `{approved, reason?}`); the next run's `resume` is its verdict — the phone may answer it too.
 - Refused (RUN_ERROR, closed): no user message; a new thread with no project; what the session refuses (busy).
+- The agent's words as they come (an ACP agent's chunks: okay-guard's `Event.Saying`): one message, each new piece
+  (TEXT_MESSAGE_CONTENT), its rest and its end when its words come whole — not sent twice.
+- From a browser's page on another origin: CORS — the preflight (`OPTIONS /agui`) answered with no token, any
+  origin; the run itself needs the token (the token is the secret).
 - Checked: `scripts/e2e/agui.mjs` — AG-UI's own client (it verifies the stream) on okay-agent with Qwen3.6-35B: the
   command asked by an interrupt, resumed, the file, the answer 42 (2026-11-02).
 

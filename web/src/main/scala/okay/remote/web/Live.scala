@@ -99,7 +99,7 @@ object Unpaired extends Transport:
   def act(body: Json)(done: Either[String, Json] => Unit): Unit = done(Left("not paired"))
 
 object Live:
-  val names: List[String] = List("hello", "step", "session", "waiting", "policy", "forgot", "telegram")
+  val names: List[String] = List("hello", "step", "session", "waiting", "policy", "forgot", "telegram", "typing")
   val TokenKey = "okay-remote.token"
   val RelayKey = "okay-remote.relay"
 

@@ -32,6 +32,10 @@ const check = (what, ok) => { console.log(`${ok ? "✓" : "✗"} ${label}: ${wha
     check("offered on New", chosen);
     if (!chosen) return done(1);
     await b.click("Start");
+    // the agent's words as they come: a bubble ending " …" seen while it types (ACP agents' chunks)
+    await b.js(`window.__typing = 0; new MutationObserver(() => {
+      if ([...document.querySelectorAll('[class*=okay-mark-agent]')].some(e => e.textContent.endsWith(' …')))
+        window.__typing++ }).observe(document.body, {subtree: true, childList: true, characterData: true})`);
     const card = `[...document.querySelectorAll('[class*=okay-mark-call-wait]')].pop()`;
     let ended = false, approved = 0;
     for (let i = 0; i < (+process.env.AGENT_WAIT || 150) && !ended; i++) {
@@ -52,6 +56,9 @@ const check = (what, ok) => { console.log(`${ok ? "✓" : "✗"} ${label}: ${wha
     check("the file written", fs.existsSync(`${projects}/demo/notes.txt`) &&
       fs.readFileSync(`${projects}/demo/notes.txt`, "utf8").includes("hello"));
     check(`a call waited for the phone (${approved} approved)`, approved > 0);
+    const typing = await b.js("window.__typing");
+    if (label.startsWith("okay-agent")) check(`its words shown as they came (${typing} changes)`, typing > 1);
+    else console.log(`  words as they came: ${typing} changes`);
     const steps = fs.readdirSync(`${home}/.okay-remote/sessions`).filter(f => f.endsWith(".jsonl"))
       .flatMap(f => fs.readFileSync(`${home}/.okay-remote/sessions/${f}`, "utf8").trim().split("\n"))
       .map(l => JSON.parse(l));

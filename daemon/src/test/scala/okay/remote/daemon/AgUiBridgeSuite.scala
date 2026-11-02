@@ -59,6 +59,19 @@ class AgUiBridgeSuite extends munit.FunSuite:
     assertEquals(acts.last("session").string, "s1")
     assertEquals(third.types, Vector("RUN_STARTED"))
 
+  test("the words as they come: one message, its new pieces; the words whole after it not sent again"):
+    val b = AgUiBridge(_ => answer => answer(Right(Json.obj("id" -> Json.Str("s1")))))
+    val o = post(b, """{"threadId": "t", "runId": "r", "messages": [{"id": "1", "role": "user", "content": "x"}],
+      "forwardedProps": {"project": "/p"}}""")
+    def typing(t: String) = b.told("typing", Json.obj("session" -> Json.Str("s1"), "text" -> Json.Str(t)))
+    typing("Let me"); typing("Let me look")
+    b.told("step", step("""{"k": "said", "text": "Let me look."}"""))
+    b.told("step", step("""{"k": "ended", "ok": true, "text": "", "ms": 1, "cost": 0, "turns": 1}"""))
+    assertEquals(o.types, Vector("RUN_STARTED", "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CONTENT",
+      "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END", "RUN_FINISHED"))
+    assertEquals(o.events.filter(_("type").string == "TEXT_MESSAGE_CONTENT").map(_("delta").string).mkString,
+      "Let me look.")
+
   test("a new thread with no project: refused, the run ended"):
     val b = AgUiBridge(_ => _ => fail("no act"))
     val o = post(b, """{"threadId": "t", "runId": "r", "messages": [{"id": "1", "role": "user", "content": "x"}]}""")

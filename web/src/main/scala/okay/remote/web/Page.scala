@@ -28,7 +28,7 @@ object Page:
     steps: Map[String, Vector[Step]] = Map.empty, waiting: Vector[Json] = Vector.empty, live: Option[Boolean] = None,
     problem: Option[String] = None, unfolded: Set[String] = Set.empty, address: String = "", saved: Boolean = false,
     unpaired: Boolean = false, changes: Option[(String, String)] = None, note: Option[String] = None,
-    tgLink: Option[String] = None):
+    tgLink: Option[String] = None, typing: Map[String, String] = Map.empty):
     def session: Option[Session] = open.flatMap(id => info.sessions.find(_.id == id))
     def waitsFor(call: String): Option[Json] = waiting.find(w => J.str(w, "call").contains(call))
 
@@ -159,6 +159,10 @@ object Page:
         J.get(j, "telegram").exists(J.bool(_, "sent")), J.get(j, "telegram").flatMap(J.str(_, "problem")).getOrElse(""),
         J.get(j, "telegram").flatMap(J.str(_, "suggest")).getOrElse("")))
     case ("session", j) => Session.fromJson(j).fold(s)(upsert(s, _))
+    // the agent's words as they come: shown until its next step (its words whole, or a call) replaces them
+    case ("typing", j) => (J.str(j, "session"), J.str(j, "text")) match
+        case (Some(id), Some(t)) => s.copy(typing = s.typing.updated(id, t))
+        case _ => s
     case ("step", j) =>
       (J.str(j, "session"), J.get(j, "step").flatMap(Step.fromJson)) match
         case (Some(id), Some(st)) =>
@@ -167,7 +171,7 @@ object Page:
               s.waiting.filterNot(w => J.str(w, "call").contains(call))
             case _ => s.waiting
           s.copy(waiting = done, steps = if s.steps.contains(id) then s.steps.updated(id, s.steps(id) :+ st)
-            else s.steps)
+            else s.steps, typing = s.typing - id)
         case _ => s
     case ("waiting", j) =>
       if s.waiting.exists(w => J.str(w, "call") == J.str(j, "call")) then s else s.copy(waiting = s.waiting :+ j)
@@ -311,7 +315,8 @@ object Page:
       Button("Changes")(Msg.Changes: Msg).at("composer")) ++
       (if x.running then List(Button("Stop", Style.Danger)(Msg.Stop: Msg).at("composer"))
       else List(Button("Forget", Style.Danger)(Msg.Forget: Msg).at("composer")))
-    (head :: items ++ List(Part.block("composer")(next, Part.slot("composer"))), buttons.result() ++ acts)
+    val typing = s.typing.get(x.id).toList.map(t => Part.block("agent")(Part.text(t + " …")))
+    (head :: items ++ typing ++ List(Part.block("composer")(next, Part.slot("composer"))), buttons.result() ++ acts)
 
   /** CHANGES: what the agent changed in the project, as git says it */
   def changes(s: State, x: Session): (List[Part], List[Button[Msg]]) =

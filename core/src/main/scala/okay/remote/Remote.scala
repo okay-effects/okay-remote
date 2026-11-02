@@ -48,11 +48,12 @@ object Models:
     val wanted = ("claude" :: "okay-agent" :: Agents.all.flatMap(_.needs)).distinct
     wanted.foldLeft(pure[Map[String, Boolean], R](Map.empty))((acc, n) =>
       acc.flatMap(m => Processes.onPath[R](n).map(b => m + (n -> b)))).flatMap(has =>
-      (if has("claude") || has("opencode") || has("okay-agent") then okayMlx[R] else pure[List[(String, String)], R](Nil)).map(gw =>
+      (if has("claude") || has("opencode") || has("okay-agent") then okayMlx[R]
+        else pure[List[(String, String)], R](Nil)).map(gw =>
         (if has("claude") then all ++ gw else Nil) ++
           Agents.all.filter(_.needs.forall(has)).map(a => s"acp:${a.id}" -> a.label) ++
-          (if has("opencode") then gw.map((id, label) => s"acp:opencode@$id" -> label.replace("Local · ", "opencode · "))
-          else Nil) ++
+          (if has("opencode") then gw.map((id, label) => s"acp:opencode@$id" ->
+            label.replace("Local · ", "opencode · ")) else Nil) ++
           (if has("okay-agent") then gw.map((id, label) => s"acp:okay-agent@$id" ->
             label.replace("Local · ", "okay-agent · ")) else Nil)))
 
@@ -179,6 +180,8 @@ final class Remote(ports: World.Ports, port: () => Int, judgeOf: String => Eithe
   private var policyNow: String = Defaults.policy
   /** when each session's turn began: its end's time is the remote's own */
   private val turns = mutable.Map.empty[String, Long]
+  /** when a session's words as they come were last told the pages */
+  private val typed = mutable.Map.empty[String, Long]
   var jail: Jail = Jail()
   val askFor: Int = 10 * 60 * 1000
 
@@ -374,6 +377,11 @@ final class Remote(ports: World.Ports, port: () => Int, judgeOf: String => Eithe
         {
           case Event.Began(s, a) => fire(stepped(x.id, Step.Began(s, a)))
           case Event.Said(t) => fire(stepped(x.id, Step.Said(t)))
+          // the words as they come: told the pages, not kept (the Said after keeps them), ten a second at most
+          case Event.Saying(t) => fire(Clock.now[W].flatMap(now =>
+              if now - typed.getOrElse(x.id, 0L) < 100 then unit
+              else { typed(x.id) = now; Pages.tell[W]("typing", Json.obj("session" -> Json.Str(x.id),
+                "text" -> Json.Str(t))) }))
           case Event.Tool(i, n, in) => fire(stepped(x.id, Step.Tool(i, n, in)))
           case Event.Result(i, t, e) => fire(stepped(x.id, Step.Result(i, t, e)))
           case Event.Ended(ok, r) => fire(Clock.now[W].flatMap(now =>

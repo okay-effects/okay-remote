@@ -333,6 +333,9 @@ final class Daemon(args: List[String]):
             case Right(out) => answer(w, 200, out)
             case Left((status, why)) => error(w, status, why)
           }
+    // AG-UI from a browser's page on another origin (CopilotKit): its preflight answered with no token (a preflight
+    // carries none) — the run itself still needs the token
+    else if r.method == "OPTIONS" && r.path == "/agui" then w.reply(204, AgUiBridge.cors, "")
     else if r.method == "GET" && Page.files.contains(r.path) then
       Page.file(r.path).fold(error(w, 404, "not built"))((kind, text) => w.reply(200, List("Content-Type" -> kind,
         "Cache-Control" -> "no-cache", "X-Content-Type-Options" -> "nosniff",
