@@ -3,6 +3,7 @@ package okay.remote
 import okay.effects.json.{Descent, Json}
 import okay.guard.{Action, Chain, Decision, Entry, Gate, Judged, Judging, Ledger, Outcome, Verdict}
 import okay.guard.acp.{AcpClient, AgentKind, Agents, Event, Host, Line}
+import okay.guard.policy.{Act, History, Outcome as Ended}
 import okay.scala3.*
 import okay.scala3.std.{Async, Clock, Level, Log, Random}
 import scala.collection.mutable
@@ -480,6 +481,33 @@ final class Remote(ports: World.Ports, port: () => Int, judgeOf: String => Eithe
       case Outcome.Pending(_, why) => acting.remove(call); answer("deny", why)
     }
 
+  /** THE HISTORY BEHIND A CALL (okay-guard's rules over history): its session's calls so far, each with how it ended
+   * — refused, failed, ran, or still running — and the call itself the focus, not run yet. An agent may tell a call
+   * twice (first empty, then with its input): one act, where it came first, with its last input */
+  private def historyOf(call: okay.guard.Call): Option[History[Act]] =
+    val key = call.id match { case Json.Str(s) => s; case o => Json.print(o) }
+    callers.get(key).map { session =>
+      val steps = kept.getOrElse(session, Vector.empty)
+      val failed = steps.collect { case Step.Result(c, _, e) => c -> e }.toMap
+      val refused = steps.collect { case Step.Decided(c, v, _) if Set("deny", "refused", "timed out")(v) => c }.toSet
+      val inputs = steps.collect { case Step.Tool(c, _, in) => c -> in }.toMap
+      def real(in: Json) = in match
+        case o: Json.Obj => Json.Obj(o.fields.map {
+          case (k @ ("file_path" | "path" | "notebook_path"), Json.Str(v)) => k -> Json.Str(Paths.real(v))
+          case f => f
+        })
+        case other => other
+      val past = steps.collect { case Step.Tool(c, name, _) if c != key => (c, name) }.distinctBy(_._1)
+        .map { (c, name) =>
+          val outcome = if refused(c) then Ended.Refused else failed.get(c) match
+            case Some(true) => Ended.Failed
+            case Some(false) => Ended.Ok
+            case None => Ended.Pending
+          Act(name, real(inputs(c)), outcome)
+        }
+      History(past, Act(call.operation, call.arguments, Ended.Pending))
+    }
+
   /** the actions that went, by call: closed in the journal when their result comes */
   private val acting = mutable.Map.empty[String, Action]
   /** whose session each call is */
@@ -490,7 +518,7 @@ final class Remote(ports: World.Ports, port: () => Int, judgeOf: String => Eithe
     def rules(call: okay.guard.Call): List[okay.guard.Rule] = Nil
     def now: Long = ports.time()
     override def decide(call: okay.guard.Call, answer: Judged => Unit): Unit = judge match
-      case Right(j) => j.guard.decide(call, answer)
+      case Right(j) => j.guard.decide(call, answer, historyOf(call))
       case Left(e) => answer(Judged(Decision.Block(-1, s"the policy does not compile: $e")))
     override def approved(call: okay.guard.Call): Unit = judge.foreach(_.guard.approved(call))
     def ask(call: okay.guard.Call, reason: String, answer: Verdict => Unit): Unit =

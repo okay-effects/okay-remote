@@ -115,6 +115,13 @@ Tried end to end (`scripts/e2e/agents.js "<label>"`, a phone's screen, 2026-10-2
 Found on the way: with its own approval mode `auto`, Qwen Code ran a command itself, asking no one — so the approval
 mode is the daemon's to set, per agent. When the daemon stops, every process it started stops with it.
 
+## What came before: rules over history (2026-11-02)
+
+Each call is judged with its session's history (okay-guard's `History`: the session's calls from its steps — a call,
+its decision, its result — each ok, failed, refused or running; the call the focus). The default policy reads it:
+a command after three failed in a row is asked ("three commands failed in a row"), a push with no passing test since
+the last edit says so. A policy of the owner's may use the facts of history too (okay-guard's specs/policy.md).
+
 ## The agent's words as they come (2026-11-02)
 
 An ACP agent's message chunks (okay-guard's `Event.Saying`: the text so far) are told the pages as `typing`

@@ -25,6 +25,24 @@ class JudgeSuite extends munit.FunSuite:
     assertEquals(decide("Bash", "command" -> "sudo ls"), "deny")
     assertEquals(decide("Bash", "command" -> "python3 x.py"), "ask")
   }
+  test("what came before: a harmless command asked after three failed in a row; a push's reason the tests") {
+    import okay.guard.policy.{Act, History, Outcome}
+    def bash(c: String, o: Outcome) = Act("Bash", Json.obj("command" -> Json.Str(c)), o)
+    def decided(past: Vector[Act], command: String): (String, String) =
+      var out = ("", "")
+      judge.decide("1", "Bash", Json.obj("command" -> Json.Str(command)), "/w/p",
+        Some(History(past, bash(command, Outcome.Pending))))((v, why) => out = (v, why))
+      out
+    val failed = Vector.fill(3)(bash("sbt test", Outcome.Failed))
+    assertEquals(decided(failed, "sbt test"), ("ask", "three commands failed in a row"))
+    assertEquals(decided(failed.take(2), "sbt test"), ("allow", ""))
+    assertEquals(decided(failed :+ bash("ls", Outcome.Ok), "sbt test"), ("allow", ""))
+    val edit = Act("Edit", Json.obj("file_path" -> Json.Str("/w/p/a")), Outcome.Ok)
+    assertEquals(decided(Vector(edit), "git push")._1, "ask")
+    assert(decided(Vector(edit), "git push")._2.nonEmpty)
+    // no history given: as before
+    assertEquals(decide("Bash", "command" -> "sbt test"), "allow")
+  }
   test("a tool no rule knows asks") {
     assertEquals(decide("mcp__x__y", "a" -> "b"), "ask")
     assertEquals(decide("WebFetch", "url" -> "https://x"), "ask")

@@ -2,14 +2,15 @@ package okay.remote
 
 import okay.effects.json.Json
 import okay.guard.{Action, Decision}
-import okay.guard.policy.{PolicyFiles, PolicyGuard}
+import okay.guard.policy.{Act, History, PolicyFiles, PolicyGuard}
 import scala.concurrent.ExecutionContext
 
 /** THE POLICY OVER AN AGENT'S TOOL CALLS (okay-guard's language): each call of Claude Code's tools an action — the
  * tool its operation, its input and `cwd` (the project's directory) its arguments — decided `allow`, `ask` or `deny`,
  * and why. A policy that does not compile is not made: fail closed is the caller's (`Judge.closed`) */
 final class Judge private (val guard: PolicyGuard):
-  def decide(id: String, tool: String, input: Json, cwd: String)(answer: (String, String) => Unit): Unit =
+  def decide(id: String, tool: String, input: Json, cwd: String, history: Option[History[Act]] = None)(
+      answer: (String, String) => Unit): Unit =
     // the project's directory with its `/`: `/w/p` must not take in `/w/p2`
     val dir = if cwd.endsWith("/") then cwd else cwd + "/"
     val args = input match
@@ -20,7 +21,7 @@ final class Judge private (val guard: PolicyGuard):
     guard.decide(Action(Json.Str(id), tool, args), j => j.decision match
       case Decision.Pass(_) => answer("allow", "")
       case Decision.Ask(_, why) => answer("ask", first(why))
-      case Decision.Block(_, why) => answer("deny", first(why)))
+      case Decision.Block(_, why) => answer("deny", first(why)), history)
 
 object Judge:
   def apply(text: String)(using ExecutionContext): Either[String, Judge] =
@@ -62,6 +63,13 @@ object Defaults:
       |ask Bash when command contains "git push" because "it leaves the machine"
       |deny Bash when command contains "sudo" because "nothing as root"
       |deny Bash when command contains "rm -rf /" or command contains "rm -rf ~" because "not the whole disk"
+      |
+      |-- what came before: the session's calls and how they ended (okay-guard's rules over history)
+      |fact failed_in_row(): Int from history
+      |fact passed_since_edit(command: Text) from history
+      |ask Bash when failed_in_row() >= 3 because "three commands failed in a row"
+      |ask Bash when command contains "git push" and not passed_since_edit("test")
+      |  because "no test passed since the last edit"
       |
       |-- the web: ask
       |ask * when tool in ["WebFetch", "WebSearch"] because "it reaches the internet"
