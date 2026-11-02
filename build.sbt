@@ -12,6 +12,7 @@ ThisBuild / version := "0.1.0-SNAPSHOT"
 ThisBuild / scalaVersion := scala3
 ThisBuild / scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Wunused:imports,privates,locals")
 ThisBuild / resolvers ++= Seq("okay-guard" at "https://okay-effects.github.io/okay-guard/maven",
+  "okay-llm" at "https://okay-effects.github.io/okay-llm/maven",
   "okay-serverless" at "https://okay-effects.github.io/okay-serverless/maven",
   "okay-store" at "https://okay-effects.github.io/okay-store/maven",
   "okay-effects" at "https://okay-effects.github.io/okay-simple/maven",
@@ -45,7 +46,9 @@ lazy val web = (project in file("web")).enablePlugins(ScalaJSPlugin).dependsOn(c
 lazy val daemon = (project in file("daemon")).dependsOn(core.jvm)
   .settings(name := "okay-remote-daemon", Compile / mainClass := Some("okay.remote.daemon.Main"),
     libraryDependencies ++= Seq("io.github.okay-effects" %% "okay-guard-jvm" % okayGuard,
-      "io.github.okay-effects" %% "okay-serverless-relay" % okayServerless, munit.value),
+      "io.github.okay-effects" %% "okay-serverless-relay" % okayServerless,
+      // AG-UI's events (okay-llm's, shared with okay-agent)
+      "io.github.okay-effects" %% "okay-llm" % "0.1.0", munit.value),
     Compile / resourceGenerators += Def.task {
       val w = (web / Compile / fullLinkJS / scalaJSLinkerOutputDirectory).value
       val _ = (web / Compile / fullLinkJS).value

@@ -161,6 +161,7 @@ final class Daemon(args: List[String]):
       case _ => ()
     val text = s"event: $event\ndata: ${Json.print(data)}\n\n"
     pages.toList.foreach(_.write(text))
+    agui.told(event, data)
     relay.foreach(_.send("event", "name" -> Json.Str(event), "data" -> data))
   private val base = s"${JvmOs.userHome}/.okay-remote"
   private val remote = Remote(OnJvm.ports(tell), () => port, Judge(_), Daemon.audit(JvmOs.userHome))
@@ -240,6 +241,9 @@ final class Daemon(args: List[String]):
       relay.foreach(_.plain("notify " + Json.print(Json.obj("text" -> Json.Str(text))), hold = true))
 
   /** the daemon's own acts (Telegram), else the remote's */
+  /** the sessions as AG-UI agents (POST /agui) */
+  private lazy val agui = AgUiBridge(b => act(b))
+
   private def act(body: Json)(answer: Either[String, Json] => Unit): Unit = J.str(body, "type") match
     case Some("telegram-link") =>
       if bot.isEmpty || relay.isEmpty then answer(Left("no Telegram bot at this relay"))
@@ -345,6 +349,7 @@ final class Daemon(args: List[String]):
       val host = r.headers.getOrElse("host", "")
       hello(host.startsWith("127.0.0.1:") || host.startsWith("localhost:"))(j =>
         s.write(s"event: hello\ndata: ${Json.print(j)}\n\n"))
+    else if r.method == "POST" && r.path == "/agui" then agui.serve(r, w)
     else if r.method == "POST" && r.path == "/act" then
       if !sameOrigin(r) then error(w, 403, "not from this page")
       else Descent.parse(r.body) match

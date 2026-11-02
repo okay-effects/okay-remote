@@ -115,6 +115,23 @@ Tried end to end (`scripts/e2e/agents.js "<label>"`, a phone's screen, 2026-10-2
 Found on the way: with its own approval mode `auto`, Qwen Code ran a command itself, asking no one — so the approval
 mode is the daemon's to set, per agent. When the daemon stops, every process it started stops with it.
 
+## Every session an AG-UI agent (2026-11-02)
+
+`POST /agui?t=<token>` (or the token in `x-okay-token`): AG-UI 1.0's RunAgentInput, answered with the run's events
+as SSE (okay-llm's `AgUi`, shared with okay-agent) — any AG-UI client (CopilotKit, its terminal and mobile clients)
+a front end of any session, whatever agent it runs (Claude Code, opencode, okay-agent, any ACP agent).
+
+- A new thread: a new session — `forwardedProps.project` (a project under the roots) and `.model` (an entry of New;
+  none: the first), the last user message its task. The thread's next runs: the last user message said to it.
+- The session's steps as events: its words a text message, a call TOOL_CALL_START/ARGS/END, its result
+  TOOL_CALL_RESULT, the policy's decision CUSTOM `okay.decided`; ended: RUN_FINISHED (not ok: its reason a text
+  first); stopped: RUN_ERROR. The stream closed with the run.
+- A call waiting for the phone: the run ends with an interrupt (`outcome: interrupt`, id = the call, reason
+  `approval`, payload `{approved, reason?}`); the next run's `resume` is its verdict — the phone may answer it too.
+- Refused (RUN_ERROR, closed): no user message; a new thread with no project; what the session refuses (busy).
+- Checked: `scripts/e2e/agui.mjs` — AG-UI's own client (it verifies the stream) on okay-agent with Qwen3.6-35B: the
+  command asked by an interrupt, resumed, the file, the answer 42 (2026-11-02).
+
 ## Telegram: told when something waits (2026-10-28)
 
 The phone is told — with the page closed — when a call waits for a decision, and when a turn is done, by a Telegram

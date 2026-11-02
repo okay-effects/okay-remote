@@ -197,6 +197,7 @@ class RemoteSuite extends munit.FunSuite:
 
 
 class ModelsSuite extends munit.FunSuite:
+  given ExecutionContext = ExecutionContext.parasitic
   test("okay-llm's gateway: Claude Code told its URL, in rozum's jail with the network that port alone"):
     val model = "okay:mlx-community/Qwen3.5-9B-MLX-4bit"
     val (jailed, env) = Models.command(model, "{}", "", Jail(rozum = true))
@@ -214,43 +215,44 @@ class ModelsSuite extends munit.FunSuite:
       if c.headOption.contains("curl") then (0, """{"data": [{"id": "mlx-community/Qwen3.6-35B-A3B-4bit"},
         {"id": "mlx-community/Qwen3.5-9B-MLX-4bit"}]}""")
       else (0, "")
-    def offer = scala.concurrent.Await.result(World.run(m.ports)(Models.okayMlx[World]),
-      scala.concurrent.duration.Duration(5, "s"))
-    val offered = offer
-    assertEquals(offered, List(
-      "okay:mlx-community/Qwen3.6-35B-A3B-4bit" -> "Local · Qwen3.6-35B-A3B-4bit (okay-mlx, loaded)",
-      "okay:mlx-community/Qwen3.5-9B-MLX-4bit" -> "Local · Qwen3.5-9B-MLX-4bit (okay-mlx)"))
-    m.runAnswer = _ => (7, "")
-    assertEquals(offer, Nil)
+    // a Future, not awaited: the JS tests too
+    def offer = World.run(m.ports)(Models.okayMlx[World])
+    offer.flatMap { offered =>
+      assertEquals(offered, List(
+        "okay:mlx-community/Qwen3.6-35B-A3B-4bit" -> "Local · Qwen3.6-35B-A3B-4bit (okay-mlx, loaded)",
+        "okay:mlx-community/Qwen3.5-9B-MLX-4bit" -> "Local · Qwen3.5-9B-MLX-4bit (okay-mlx)"))
+      m.runAnswer = _ => (7, "")
+      offer.map(none => assertEquals(none, Nil))
+    }
 
   test("opencode on okay-llm's gateway: offered for each model it lists, started with the provider and model inline"):
     val m = MemoryWorld(has = n => n == "claude" || n == "opencode")
     m.runAnswer = c =>
       if c.headOption.contains("curl") then (0, """{"data": [{"id": "a/b"}]}""") else (0, "")
-    val here = scala.concurrent.Await.result(World.run(m.ports)(Models.here[World]),
-      scala.concurrent.duration.Duration(5, "s"))
-    assert(here.contains("acp:opencode@okay:a/b" -> "opencode · b (okay-mlx, loaded)"), here.toString)
-    val Some((kind, env)) = Models.acp("acp:opencode@okay:a/b"): @unchecked
-    assertEquals(kind.id, "opencode")
-    val conf = okay.effects.json.Json.fromText(env("OPENCODE_CONFIG_CONTENT"))
-    assertEquals(conf("model").string, "okay-mlx/a/b")
-    assertEquals(conf("provider")("okay-mlx")("options")("baseURL").string, "http://127.0.0.1:8090/v1")
-    assertEquals(conf("permission")("bash").string, "ask")
-    // opencode alone: every tool asked too (its shell runs unasked otherwise)
-    val plain = okay.effects.json.Json.fromText(Models.acp("acp:opencode").get._2("OPENCODE_CONFIG_CONTENT"))
-    assertEquals(plain("permission")("*").string, "ask")
-    assert(plain.field("model").isEmpty)
+    World.run(m.ports)(Models.here[World]).map { here =>
+      assert(here.contains("acp:opencode@okay:a/b" -> "opencode · b (okay-mlx, loaded)"), here.toString)
+      val Some((kind, env)) = Models.acp("acp:opencode@okay:a/b"): @unchecked
+      assertEquals(kind.id, "opencode")
+      val conf = okay.effects.json.Json.fromText(env("OPENCODE_CONFIG_CONTENT"))
+      assertEquals(conf("model").string, "okay-mlx/a/b")
+      assertEquals(conf("provider")("okay-mlx")("options")("baseURL").string, "http://127.0.0.1:8090/v1")
+      assertEquals(conf("permission")("bash").string, "ask")
+      // opencode alone: every tool asked too (its shell runs unasked otherwise)
+      val plain = okay.effects.json.Json.fromText(Models.acp("acp:opencode").get._2("OPENCODE_CONFIG_CONTENT"))
+      assertEquals(plain("permission")("*").string, "ask")
+      assert(plain.field("model").isEmpty)
+    }
 
   test("okay-agent on okay-llm's gateway: offered for each model it lists, started with that model and the gateway"):
     val m = MemoryWorld(has = n => n == "okay-agent")
     m.runAnswer = c =>
       if c.headOption.contains("curl") then (0, """{"data": [{"id": "a/b"}]}""") else (0, "")
-    val here = scala.concurrent.Await.result(World.run(m.ports)(Models.here[World]),
-      scala.concurrent.duration.Duration(5, "s"))
-    assert(here.contains("acp:okay-agent@okay:a/b" -> "okay-agent · b (okay-mlx, loaded)"), here.toString)
-    val Some((kind, env)) = Models.acp("acp:okay-agent@okay:a/b"): @unchecked
-    assertEquals(kind.command, List("okay-agent", "acp"))
-    assertEquals(env, Map("OKAY_AGENT_MODEL" -> "a/b", "OKAY_AGENT_URL" -> "http://127.0.0.1:8090/v1"))
+    World.run(m.ports)(Models.here[World]).map { here =>
+      assert(here.contains("acp:okay-agent@okay:a/b" -> "okay-agent · b (okay-mlx, loaded)"), here.toString)
+      val Some((kind, env)) = Models.acp("acp:okay-agent@okay:a/b"): @unchecked
+      assertEquals(kind.command, List("okay-agent", "acp"))
+      assertEquals(env, Map("OKAY_AGENT_MODEL" -> "a/b", "OKAY_AGENT_URL" -> "http://127.0.0.1:8090/v1"))
+    }
 
   test("paths as the projects are: macOS's /tmp, /var, /etc are /private/…, others as they are"):
     assertEquals(Paths.real("/tmp/p/notes.txt"), "/private/tmp/p/notes.txt")
