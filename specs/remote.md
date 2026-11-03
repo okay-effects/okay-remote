@@ -122,6 +122,12 @@ its decision, its result — each ok, failed, refused or running; the call the f
 a command after three failed in a row is asked ("three commands failed in a row"), a push with no passing test since
 the last edit says so. A policy of the owner's may use the facts of history too (okay-guard's specs/policy.md).
 
+`okay-remote audit [session]` — the audit, `extend` over each session's history: every call decided again by the
+policy now, with the calls before it as they ended; each line the word then (its steps' last: allow, approved,
+refused…), the verdict now, the tool, what it was given, how it ended, why — `≠` where the policy now decides
+otherwise (an approved or refused call was an ask). Read only, as `verify`. Seen on this machine's sessions: 110 calls,
+none decided otherwise by the policy of today.
+
 ## The agent's words as they come (2026-11-02)
 
 An ACP agent's message chunks (okay-guard's `Event.Saying`: the text so far) are told the pages as `typing`

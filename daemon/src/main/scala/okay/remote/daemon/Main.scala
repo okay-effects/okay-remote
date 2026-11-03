@@ -39,6 +39,7 @@ object Main:
     if args.contains("--version") then { println(s"okay-remote $version"); sys.exit(0) }
     JvmOs.loop.execute(() =>
       if args.headOption.contains("verify") then Daemon.verify()
+      else if args.headOption.contains("audit") then Daemon.audit(args.lift(1))
       else new Daemon(args.toList).start())
 
 /** THE JVM AS THE REMOTE'S PLACE: okay-guard's `JvmOs` (its loop, its files), processes started here in a directory
@@ -384,6 +385,16 @@ object Daemon:
         files.append(r, J.long(r, "ended").max(J.long(r, "at")).max(0L) match { case 0L => JvmOs.now; case t => t })
       def policy(hash: String, text: String): Unit = files.keepPolicy(hash, text)
 
+  /** `okay-remote audit [session]`: each session's calls decided again by the policy now, with the history before
+   * each — the word then, the verdict now, why */
+  def audit(only: Option[String]): Unit =
+    given scala.concurrent.ExecutionContext = JvmOs.ec
+    val r = Remote(OnJvm.ports((_, _) => ()), () => 0, Judge(_))
+    r.start(() => r.go(r.audit(only)) { audits =>
+      JvmOs.out(if audits.isEmpty then "no session to audit\n" else Audits.report(audits) + "\n")
+      JvmOs.exit(0)
+    })
+
   /** `okay-remote verify`: okay-guard's journal (every action, chained), and every session's record */
   def verify(): Unit =
     given scala.concurrent.ExecutionContext = JvmOs.ec
@@ -397,6 +408,27 @@ object Daemon:
       }
       JvmOs.exit(if journal.isRight && checked.forall(_._2.isRight) then 0 else 1)
     })
+
+object Audits:
+  /** an audit in words: for each session, each call — the word then, the verdict now, the tool, what it was given,
+   * how it ended, why; a change marked */
+  def report(audits: List[(String, Vector[okay.remote.Audited])]): String =
+    audits.map { (id, calls) =>
+      val changed = calls.count(c => c.then_.nonEmpty && word(c.then_) != c.now)
+      s"$id: ${calls.size} calls${if changed > 0 then s", $changed decided otherwise now" else ""}" +:
+        calls.zipWithIndex.map { (c, i) =>
+          val a = c.act
+          val gist = Vector("command", "file_path", "path").flatMap(a.text).headOption
+            .getOrElse(Json.print(a.args)).linesIterator.nextOption().getOrElse("").take(70)
+          val mark = if c.then_.nonEmpty && word(c.then_) != c.now then "≠" else " "
+          f"$mark${i + 1}%4d then ${c.then_}%-8s now ${c.now}%-5s ${a.tool} $gist (${a.outcome.toString.toLowerCase})" +
+            (if c.why.isEmpty then "" else s" — ${c.why}")
+        }
+    }.map(_.mkString("\n")).mkString("\n\n")
+  /** a word then as a verdict: approved and refused were asked */
+  private def word(w: String): String = w match
+    case "approved" | "refused" | "timed out" => "ask"
+    case other => other
 
 /** THE PAGE'S FILES: its html, manifest, worker, icon (site/), its modules (web/, linked) — in the jar */
 object Page:

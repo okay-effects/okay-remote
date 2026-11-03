@@ -42,6 +42,9 @@ object Paths:
   def real(path: String): String =
     if Seq("/tmp", "/var", "/etc").exists(r => path == r || path.startsWith(r + "/")) then "/private" + path else path
 
+/** A CALL AUDITED: the act, the word decided then, the verdict now (with what came before it), and why */
+final case class Audited(act: Act, then_ : String, now: String, why: String)
+
 /** THE MODELS A SESSION MAY RUN ON: Claude's, the local ones through rozum, and okay-llm's gateway (okay-mlx) */
 object Models:
   /** what a session may run on here: Claude Code with Claude or a local model, and the ACP agents installed */
@@ -97,7 +100,8 @@ object Models:
       if code != 0 then Nil
       else
         scala.util.Try(Json.fromText(out)("data").list.map(_("id").string).toList).getOrElse(Nil).zipWithIndex
-          .map((id, i) => s"okay:$id" -> s"Local · ${id.split('/').last} (okay-mlx${if i == 0 then ", loaded" else ""})"))
+          .map((id, i) =>
+            s"okay:$id" -> s"Local · ${id.split('/').last} (okay-mlx${if i == 0 then ", loaded" else ""})"))
   /** what goes through the policy for a session on it */
   def through(model: String): String =
     acp(model).fold("every tool call (Claude Code's hook)")(_._1.through)
@@ -486,27 +490,52 @@ final class Remote(ports: World.Ports, port: () => Int, judgeOf: String => Eithe
    * twice (first empty, then with its input): one act, where it came first, with its last input */
   private def historyOf(call: okay.guard.Call): Option[History[Act]] =
     val key = call.id match { case Json.Str(s) => s; case o => Json.print(o) }
-    callers.get(key).map { session =>
-      val steps = kept.getOrElse(session, Vector.empty)
-      val failed = steps.collect { case Step.Result(c, _, e) => c -> e }.toMap
-      val refused = steps.collect { case Step.Decided(c, v, _) if Set("deny", "refused", "timed out")(v) => c }.toSet
-      val inputs = steps.collect { case Step.Tool(c, _, in) => c -> in }.toMap
-      def real(in: Json) = in match
-        case o: Json.Obj => Json.Obj(o.fields.map {
-          case (k @ ("file_path" | "path" | "notebook_path"), Json.Str(v)) => k -> Json.Str(Paths.real(v))
-          case f => f
-        })
-        case other => other
-      val past = steps.collect { case Step.Tool(c, name, _) if c != key => (c, name) }.distinctBy(_._1)
-        .map { (c, name) =>
-          val outcome = if refused(c) then Ended.Refused else failed.get(c) match
-            case Some(true) => Ended.Failed
-            case Some(false) => Ended.Ok
-            case None => Ended.Pending
-          Act(name, real(inputs(c)), outcome)
-        }
-      History(past, Act(call.operation, call.arguments, Ended.Pending))
+    callers.get(key).map(session => History(actsOf(session).filterNot(_._1 == key).map(_._2),
+      Act(call.operation, call.arguments, Ended.Pending)))
+
+  /** a session's calls as acts, in order, by their call's id: each with how it ended (refused, failed, ran, or
+   * still running) — its paths real, as the gate judged them */
+  private def actsOf(session: String): Vector[(String, Act)] =
+    val steps = kept.getOrElse(session, Vector.empty)
+    val failed = steps.collect { case Step.Result(c, _, e) => c -> e }.toMap
+    val refused = steps.collect { case Step.Decided(c, v, _) if Set("deny", "refused", "timed out")(v) => c }.toSet
+    val inputs = steps.collect { case Step.Tool(c, _, in) => c -> in }.toMap
+    def real(in: Json) = in match
+      case o: Json.Obj => Json.Obj(o.fields.map {
+        case (k @ ("file_path" | "path" | "notebook_path"), Json.Str(v)) => k -> Json.Str(Paths.real(v))
+        case f => f
+      })
+      case other => other
+    steps.collect { case Step.Tool(c, name, _) => (c, name) }.distinctBy(_._1).map { (c, name) =>
+      val outcome = if refused(c) then Ended.Refused else failed.get(c) match
+        case Some(true) => Ended.Failed
+        case Some(false) => Ended.Ok
+        case None => Ended.Pending
+      c -> Act(name, real(inputs(c)), outcome)
     }
+
+  /** THE AUDIT OF A SESSION (okay-guard's rules over history): its calls decided again by the policy now, each with
+   * the history before it — `extend` over the session's history; each with the decision then (its steps' last word),
+   * the verdict now, and why */
+  def audit(only: Option[String]): List[(String, Vector[Audited])] ! W =
+    val ids = only.fold(sessions.keys.toList.sorted)(List(_)).filter(sessions.contains)
+    each(ids)(id => loaded(id).flatMap { _ =>
+      val project = sessions.get(id).fold("")(_.project)
+      val steps = kept.getOrElse(id, Vector.empty)
+      val then_ = steps.collect { case Step.Decided(c, v, _) => c -> v }.toMap
+      val acts = actsOf(id)
+      // each point decided in order (a policy's state goes on from one to the next), each answer awaited
+      val points = History.of(acts.map(_._2)).fold(Vector.empty[History[Act]])(_.duplicate.all)
+      def decided(at: History[Act]): (String, String) ! W = judge match
+        case Left(e) => pure((s"deny", s"the policy does not compile: $e"))
+        case Right(j) =>
+          val got = Promise[(String, String)]()
+          j.decide("audit", at.focus.tool, at.focus.args, project,
+            Some(History(at.past, at.focus.copy(outcome = Ended.Pending))))((v, why) => { got.trySuccess((v, why)); () })
+          Async.fromFuture[(String, String), W](got.future)
+      each(points)(decided).map(verdicts => id -> acts.zip(verdicts).map { case ((c, a), (now, why)) =>
+        Audited(a, then_.getOrElse(c, ""), now, why) })
+    })
 
   /** the actions that went, by call: closed in the journal when their result comes */
   private val acting = mutable.Map.empty[String, Action]
