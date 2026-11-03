@@ -18,6 +18,8 @@ enum Live[X]:
   case CopyPairing() extends Live[Boolean]
   /** a pairing link pasted (or scanned): kept, and the daemon reached by it */
   case Pair(link: String) extends Live[Boolean]
+  /** a QR code read by the camera, where there is one (a phone): its text */
+  case Scan() extends Live[Option[String]]
 
 /** HOW THE DAEMON IS REACHED: its events into `put`, an act answered; what a platform keeps and copies */
 trait Transport:
@@ -28,6 +30,8 @@ trait Transport:
   def pairing: Option[String] = None
   /** a pairing link: kept, the daemon reached by it; whether it was one */
   def pair(link: String): Boolean = false
+  /** a QR code read by the camera: none where there is no camera to ask (a browser's page pastes) */
+  def scan(): Option[String] = None
   /** a text put where the person can paste it (the clipboard, the phone's sharing); whether it went */
   def copy(text: String): Boolean = false
 
@@ -53,7 +57,8 @@ object Live:
           case Live.Address() => k(transport.address)
           case Live.Unpair() => transport.forget(); k(())
           case Live.CopyPairing() => k(transport.pairing.exists(transport.copy))
-          case Live.Pair(link) => k(transport.pair(link))))
+          case Live.Pair(link) => k(transport.pair(link))
+          case Live.Scan() => k(transport.scan())))
 
   /** WHAT CAME, KEPT UNTIL A SCREEN LISTENS: all there is to the one listening, on the platform's next turn */
   final class Inbox(later: (() => Unit) => Unit):

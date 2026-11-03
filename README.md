@@ -41,6 +41,22 @@ To start okay-remote with every login, so the phone can always reach it while th
 okay-remote service install      # okay-remote service status | okay-remote service uninstall
 ```
 
+## A native iPhone app (no paid Apple account)
+
+The same screens as the page, drawn natively by SwiftUI (okay-faces' iOS face; the program is Scala Native), through
+the same sealed relay. Installed with SideStore and a free Apple ID:
+
+1. Build it on a Mac with Xcode and xcodegen, okay-faces checked out beside this repository: `scripts/ios.sh ipa` →
+   `dist/okay-remote.ipa` (unsigned).
+2. Install SideStore on the iPhone once (sidestore.io: iloader or AltServer on the Mac, your Apple ID), turn on
+   Developer Mode (Settings → Privacy & Security).
+3. Send `okay-remote.ipa` to the phone (AirDrop → Files), open SideStore → My Apps → + → the file. SideStore signs
+   it with your Apple ID.
+4. Open okay-remote → Scan the QR code shown on your computer under Phone (or paste the pairing link).
+
+A free Apple ID signs for 7 days: SideStore renews it over Wi-Fi (open SideStore once a week). No push notifications
+without a paid account: Telegram still tells you when the app is closed.
+
 ## Be told in Telegram
 
 okay-remote can tell you in Telegram when an agent waits for your decision and when it is done — even with its page

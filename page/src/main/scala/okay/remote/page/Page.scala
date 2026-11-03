@@ -23,7 +23,8 @@ object Page:
   final case class State(info: Info = Info(), place: String = "sessions", open: Option[String] = None,
     steps: Map[String, Vector[Step]] = Map.empty, waiting: Vector[Json] = Vector.empty, live: Option[Boolean] = None,
     problem: Option[String] = None, unfolded: Set[String] = Set.empty, address: String = "", saved: Boolean = false,
-    unpaired: Boolean = false, changes: Option[(String, String)] = None, note: Option[String] = None,
+    unpaired: Boolean = false, scanner: Boolean = false, changes: Option[(String, String)] = None,
+    note: Option[String] = None,
     tgLink: Option[String] = None, typing: Map[String, String] = Map.empty,
     acts: Int = 0, pending: Map[String, (State, Either[String, Json]) => State] = Map.empty):
     def session: Option[Session] = open.flatMap(id => info.sessions.find(_.id == id))
@@ -51,6 +52,7 @@ object Page:
     case TelegramUnlink
     case CopyPairing
     case Pair(link: String)
+    case Scan
 
   enum Ask:
     case Act(body: Json, after: (State, Either[String, Json]) => State)
@@ -58,6 +60,7 @@ object Page:
     case Forget
     case Copy
     case Paste(link: String)
+    case Scan
 
   // ---- THE PROGRAM
 
@@ -81,10 +84,19 @@ object Page:
         case Ask.Forget => live[Unit, R](Live.Unpair()).map(_ => st)
         case Ask.Copy => live[Boolean, R](Live.CopyPairing()).map(ok => st.copy(note = Some(if ok then "Copied. " +
             "Paste it in okay-remote in Telegram (or another browser) to pair it too." else "Nothing to copy here.")))
-        case Ask.Paste(link) => live[Boolean, R](Live.Pair(link)).map(ok =>
-            if ok then st else st.copy(problem = Some("That is not a pairing link: it has #s= and 43 letters.")))))
+        case Ask.Paste(link) => paste[R](st, link)
+        case Ask.Scan => live[Option[String], R](Live.Scan()).flatMap {
+            case None => pure[State, R](st.copy(problem = Some("No QR code was read.")))
+            case Some(link) => paste[R](st, link)
+          }))
         .flatMap(loop[R](_, events))
     }
+
+  /** a pairing link given: kept, and the daemon reached by it — a page reloads, a phone goes on */
+  private def paste[R[_]](st: State, link: String)(using In[Live, R]): State ! R =
+    live[Boolean, R](Live.Pair(link)).map(ok =>
+      if ok then st.copy(unpaired = false, live = None, problem = None)
+      else st.copy(problem = Some("That is not a pairing link: it has #s= and 43 letters.")))
 
   private def act(kind: String, fields: (String, Json)*)(after: (State, Either[String, Json]) => State): Ask =
     Ask.Act(Json.Obj(("type" -> Json.Str(kind)) +: fields.toVector), after)
@@ -105,6 +117,7 @@ object Page:
     case Msg.Unpair => (s.copy(unpaired = true, live = Some(false)), List(Ask.Forget))
     case Msg.CopyPairing => (s.copy(problem = None), List(Ask.Copy))
     case Msg.Pair(link) => (s.copy(problem = None), List(Ask.Paste(link)))
+    case Msg.Scan => (s.copy(problem = None), List(Ask.Scan))
     case Msg.TelegramLink => (s.copy(problem = None), List(act("telegram-link")((st, r) => r match
         case Left(e) => st.copy(problem = Some(e))
         case Right(j) => st.copy(tgLink = J.str(j, "url")))))
@@ -151,6 +164,7 @@ object Page:
           after(s.copy(pending = s.pending - J.str(j, "id").getOrElse("")), r)
     case ("live", Json.Bool(b)) => s.copy(live = Some(b))
     case ("unpaired", _) => s.copy(unpaired = true)
+    case ("scanner", Json.Bool(b)) => s.copy(scanner = b)
     case ("telegram", j) =>
       s.copy(info = s.info.copy(bot = J.str(j, "bot").getOrElse(""), linked = J.bool(j, "linked"),
         tgSent = J.bool(j, "sent"), tgProblem = J.str(j, "problem").getOrElse(""),
@@ -196,9 +210,9 @@ object Page:
     List("sessions" -> "Sessions", "new" -> "New", "policy" -> "Policy", "phone" -> "Phone")
 
   def render(s: State): Screen[Msg] =
-    if s.unpaired then unpaired else rendered(s)
+    if s.unpaired then unpaired(s) else rendered(s)
 
-  def unpaired: Screen[Msg] =
+  def unpaired(s: State): Screen[Msg] =
     val paste = Form.one(Field.text("Or paste a pairing link"))
     Screen[Msg]("okay-remote", List(
     Part.block("top")(Part.block("brand")(Part.text("okay-remote")), Part.block("live-off")(Part.text("not paired"))),
@@ -208,8 +222,9 @@ object Page:
         "relay " +
         "passes your sessions sealed end to end, and cannot read them."),
       Part.block("small")(Part.text("In Telegram, or another browser: on a phone already paired, Phone → Copy the " +
-        "pairing link, and paste it here.")), paste)),
-    List(Button.submit("Pair", paste)(Msg.Pair(_): Msg)))
+        "pairing link, and paste it here.")), paste)) ++ s.problem.toList.map(Part.problem),
+    (if s.scanner then List(Button("Scan the QR code", Style.Primary)(Msg.Scan: Msg)) else Nil) :+
+      Button.submit("Pair", paste)(Msg.Pair(_): Msg))
 
   def rendered(s: State): Screen[Msg] =
     val waits = s.waiting.size

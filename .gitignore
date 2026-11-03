@@ -7,3 +7,6 @@ relay/dist/
 relay/node_modules/
 relay/.env
 relay/.wrangler/
+ios/lib/
+ios/build/
+ios/OkayRemote.xcodeproj/

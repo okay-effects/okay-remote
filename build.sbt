@@ -39,7 +39,7 @@ lazy val core = crossProject(JVMPlatform, JSPlatform).crossType(CrossType.Pure).
 
 /** THE PAGE'S PROGRAM, a browser's and a phone's: an okay-ui program over the daemon (`Live`) — the projects, a session
  * as a conversation, the policy (specs/ios.md) */
-lazy val page = crossProject(JSPlatform, NativePlatform).crossType(CrossType.Pure).in(file("page")).dependsOn(model)
+lazy val page = crossProject(JVMPlatform, JSPlatform, NativePlatform).crossType(CrossType.Pure).in(file("page")).dependsOn(model)
   .settings(name := "okay-remote-page",
     libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-ui-scala3" % okayUi, munit.value))
 
@@ -113,3 +113,16 @@ relayDist := {
     "\nexport default {\n" + named.map { case (f, i) => s"""  "${f.getName}": f$i,""" }.mkString("\n") + "\n};\n")
   out
 }
+
+/** THE PHONE (specs/ios.md): the page's program on okay-faces' mobile face, through the relay over the phone's own
+ * powers — Scala Native linked into a static library for the SwiftUI shell (`ios/`, `scripts/ios.sh`); tested on the
+ * JVM, the phone a `Device.Memory` */
+lazy val phone = crossProject(JVMPlatform, NativePlatform).crossType(CrossType.Pure).in(file("phone"))
+  .dependsOn(page)
+  .settings(name := "okay-remote-phone", publish / skip := true,
+    libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-faces-mobile" % "0.1.0",
+      "io.github.okay-effects" %%% "okay-ui-faces" % okayUi,
+      "io.github.okay-effects" %%% "okay-serverless-pairing" % okayServerless,
+      "io.github.okay-effects" %%% "okay-effects-machine" % "0.1.1", munit.value))
+  // tested on the JVM (its Sealing JCA's); on Native the phone's library alone, linked for iOS
+  .nativeSettings(IosBuild.library, Test / sources := Nil, Test / test := {})
