@@ -82,6 +82,16 @@ opencode too: New offers **opencode · <model> (okay-mlx)** for each model the g
 provider and the model given it inline (`OPENCODE_CONFIG_CONTENT`), and set to ask for every tool, so each call goes
 through the policy (left to itself, opencode runs its shell without asking).
 
+[okay-agent](https://github.com/okay-effects/okay-agent) too, once installed: New offers **okay-agent · <model>
+(okay-mlx)** — its files and commands all through okay-remote's policy, its words shown as they come, a call after
+three failed in a row asked.
+
+Each call is judged with what came before it in its session: the default policy asks after three failed commands in a
+row. `okay-remote audit [session]` decides every past call again with the policy of today and says why.
+
+**AG-UI**: `POST /agui?t=<token>` makes any session an AG-UI agent — any AG-UI client (CopilotKit, its terminal and
+mobile clients) a front end; a call waiting for the phone an interrupt, the next run's `resume` its verdict.
+
 ## Safe, in layers
 
 1. **The policy decides every action** before it is done. Claude Code is held by its PreToolUse hook (every tool
