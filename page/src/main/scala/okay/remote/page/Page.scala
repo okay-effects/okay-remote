@@ -1,11 +1,8 @@
-package okay.remote.web
+package okay.remote.page
 
 import okay.business.scala3.*
 import okay.effects.json.Json
 import okay.remote.{J, Session, Step}
-import okay.scala3.std.Lifted
-import scala.concurrent.Future
-import scala.scalajs.js
 
 /**
  * THE PAGE AS AN OKAY-UI PROGRAM: its state a fold of the daemon's events; each state a `Screen` — the sessions, a
@@ -14,8 +11,7 @@ import scala.scalajs.js
  * and the acts it asks of the daemon (`Live`).
  */
 object Page:
-  type Of[X] = (Lifted[Future] + Ui + Live)[X]
-  private def live[X](asked: Live[X]): X ! Of = perform[Live](asked)
+  private def live[X, R[_]](asked: Live[X])(using In[Live, R]): X ! R = perform[Live](asked)
 
   final case class Info(projects: List[String] = Nil, sessions: Vector[Session] = Vector.empty,
     models: List[(String, String)] = Nil, through: Map[String, String] = Map.empty, policy: String = "",
@@ -28,7 +24,8 @@ object Page:
     steps: Map[String, Vector[Step]] = Map.empty, waiting: Vector[Json] = Vector.empty, live: Option[Boolean] = None,
     problem: Option[String] = None, unfolded: Set[String] = Set.empty, address: String = "", saved: Boolean = false,
     unpaired: Boolean = false, changes: Option[(String, String)] = None, note: Option[String] = None,
-    tgLink: Option[String] = None, typing: Map[String, String] = Map.empty):
+    tgLink: Option[String] = None, typing: Map[String, String] = Map.empty,
+    acts: Int = 0, pending: Map[String, (State, Either[String, Json]) => State] = Map.empty):
     def session: Option[Session] = open.flatMap(id => info.sessions.find(_.id == id))
     def waitsFor(call: String): Option[Json] = waiting.find(w => J.str(w, "call").contains(call))
 
@@ -64,24 +61,29 @@ object Page:
 
   // ---- THE PROGRAM
 
-  def main: Unit ! Of =
+  /** THE PROGRAM, over any row with the screens and the daemon: the page's (with its browser's `Async`), the phone's */
+  def main[R[_]](using In[Ui, R], In[Live, R]): Unit ! R =
     for
-      events <- live(Live.Listen())
-      address <- live(Live.Address())
-      _ <- loop(State(address = address), events)
+      events <- live[Events[List[(String, Json)]], R](Live.Listen())
+      address <- live[String, R](Live.Address())
+      _ <- loop[R](State(address = address), events)
     yield ()
 
-  def loop(s: State, events: Events[List[(String, Json)]]): Unit ! Of =
-    show[Msg, Of](render(s).until(events.map(Msg.Came(_)))).flatMap { m =>
+  /** a screen, a message, the next state; an act SENT, not waited for: its answer comes among the events, as
+   * `answer`, and is applied then (`pending`) — so the program waits for nothing but the person and the daemon */
+  def loop[R[_]](s: State, events: Events[List[(String, Json)]])(using In[Ui, R], In[Live, R]): Unit ! R =
+    show[Msg, R](render(s).until(events.map(Msg.Came(_)))).flatMap { m =>
       val (next, asks) = step(s, m)
-      asks.foldLeft(pure[State, Of](next))((p, ask) => p.flatMap(st => ask match
-        case Ask.Act(body, after) => live(Live.Act(body)).map(after(st, _))
-        case Ask.Forget => live(Live.Unpair()).map(_ => st)
-        case Ask.Copy => live(Live.CopyPairing()).map(ok => st.copy(note = Some(if ok then "Copied. Paste it in " +
-            "okay-remote in Telegram (or another browser) to pair it too." else "Nothing to copy here.")))
-        case Ask.Paste(link) => live(Live.Pair(link)).map(ok =>
+      asks.foldLeft(pure[State, R](next))((p, ask) => p.flatMap(st => ask match
+        case Ask.Act(body, after) =>
+          val id = s"a${st.acts + 1}"
+          live[Unit, R](Live.Act(id, body)).map(_ => st.copy(acts = st.acts + 1, pending = st.pending + (id -> after)))
+        case Ask.Forget => live[Unit, R](Live.Unpair()).map(_ => st)
+        case Ask.Copy => live[Boolean, R](Live.CopyPairing()).map(ok => st.copy(note = Some(if ok then "Copied. " +
+            "Paste it in okay-remote in Telegram (or another browser) to pair it too." else "Nothing to copy here.")))
+        case Ask.Paste(link) => live[Boolean, R](Live.Pair(link)).map(ok =>
             if ok then st else st.copy(problem = Some("That is not a pairing link: it has #s= and 43 letters.")))))
-        .flatMap(loop(_, events))
+        .flatMap(loop[R](_, events))
     }
 
   private def act(kind: String, fields: (String, Json)*)(after: (State, Either[String, Json]) => State): Ask =
@@ -140,6 +142,13 @@ object Page:
 
   /** an event of the daemon, into the state */
   def came(s: State, e: (String, Json)): State = e match
+    // an act's answer: what it was sent for, applied now
+    case ("answer", j) => J.str(j, "id").flatMap(s.pending.get) match
+        case None => s
+        case Some(after) =>
+          val r = if J.bool(j, "ok") then Right(J.get(j, "body").getOrElse(Json.Obj.empty))
+            else Left(J.get(j, "body").flatMap(J.str(_, "error")).getOrElse("refused"))
+          after(s.copy(pending = s.pending - J.str(j, "id").getOrElse("")), r)
     case ("live", Json.Bool(b)) => s.copy(live = Some(b))
     case ("unpaired", _) => s.copy(unpaired = true)
     case ("telegram", j) =>
@@ -227,7 +236,7 @@ object Page:
   private def short(project: String): String = project.split('/').lastOption.getOrElse(project)
   private def modelLabel(s: State, m: String): String = s.info.models.find(_._1 == m).map(_._2).getOrElse(m)
   private def ago(ms: Long): String =
-    val secs = ((js.Date.now() - ms) / 1000).toLong
+    val secs = (System.currentTimeMillis() - ms) / 1000
     if secs < 60 then "now" else if secs < 3600 then s"${secs / 60} min ago"
     else if secs < 86400 then s"${secs / 3600} h ago" else s"${secs / 86400} d ago"
 

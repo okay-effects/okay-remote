@@ -25,15 +25,26 @@ ThisBuild / resolvers ++= Seq("okay-guard" at "https://okay-effects.github.io/ok
 
 val munit = Def.setting("org.scalameta" %%% "munit" % "1.2.3" % Test)
 
+/** WHAT THE PAGE AND THE PHONE READ: a session, its steps, the JSON's words — on every platform, a phone's too */
+lazy val model = crossProject(JVMPlatform, JSPlatform, NativePlatform).crossType(CrossType.Pure).in(file("model"))
+  .settings(name := "okay-remote-model",
+    libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-effects-json" % "0.1.1", munit.value))
+
 /** THE REMOTE'S LOGIC: the agent's steps, the sessions, the policy over its calls — no platform */
-lazy val core = crossProject(JVMPlatform, JSPlatform).crossType(CrossType.Pure).in(file("core"))
+lazy val core = crossProject(JVMPlatform, JSPlatform).crossType(CrossType.Pure).in(file("core")).dependsOn(model)
   .settings(name := "okay-remote-core",
     libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-guard-core" % okayGuard,
       "io.github.okay-effects" %%% "okay-guard-policy" % okayGuard,
       "io.github.okay-effects" %%% "okay-guard-acp" % okayGuard, munit.value))
 
-/** THE PAGE: an okay-ui program, phone first — the projects, a session as a conversation, the policy */
-lazy val web = (project in file("web")).enablePlugins(ScalaJSPlugin).dependsOn(core.js)
+/** THE PAGE'S PROGRAM, a browser's and a phone's: an okay-ui program over the daemon (`Live`) — the projects, a session
+ * as a conversation, the policy (specs/ios.md) */
+lazy val page = crossProject(JSPlatform, NativePlatform).crossType(CrossType.Pure).in(file("page")).dependsOn(model)
+  .settings(name := "okay-remote-page",
+    libraryDependencies ++= Seq("io.github.okay-effects" %%% "okay-ui-scala3" % okayUi, munit.value))
+
+/** THE PAGE: the program in a browser — on the machine or through the relay */
+lazy val web = (project in file("web")).enablePlugins(ScalaJSPlugin).dependsOn(core.js, page.js)
   .settings(name := "okay-remote-web",
     Compile / scalaJSModuleInitializers :=
       Seq(org.scalajs.linker.interface.ModuleInitializer.mainMethodWithArgs("okay.remote.web.Main", "main")

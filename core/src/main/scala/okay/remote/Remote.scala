@@ -23,20 +23,6 @@ object Audit:
 /** an agent's process: a line to it, its lines, its end (okay-guard-acp's `Line`) */
 trait Agent extends Line
 
-/** a session as the list shows it */
-final case class Session(id: String, project: String, model: String, title: String, agent: String = "",
-  created: Long = 0, updated: Long = 0, running: Boolean = false, busy: Boolean = false, waiting: Int = 0):
-  def toJson: Json = Json.Obj(Vector("id" -> Json.Str(id), "project" -> Json.Str(project),
-    "model" -> Json.Str(model), "title" -> Json.Str(title), "agent" -> Json.Str(agent),
-    "created" -> Json.num(created), "updated" -> Json.num(updated), "running" -> Json.Bool(running),
-    "busy" -> Json.Bool(busy), "waiting" -> Json.num(waiting)))
-
-object Session:
-  import J.*
-  def fromJson(j: Json): Option[Session] = str(j, "id").map(id => Session(id, str(j, "project").getOrElse(""),
-    str(j, "model").getOrElse(""), str(j, "title").getOrElse(""), str(j, "agent").getOrElse(""),
-    long(j, "created"), long(j, "updated"), bool(j, "running"), bool(j, "busy"), long(j, "waiting").toInt))
-
 /** PATHS AS THE PROJECTS ARE: kept real-pathed, and macOS's own links — /tmp, /var, /etc — are /private/… */
 object Paths:
   def real(path: String): String =
